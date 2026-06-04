@@ -1,0 +1,28 @@
+{
+  "name": "cargo-build",
+  "description": "Sandbox for running cargo build in a Rust project",
+  "fs": [
+    { "path": "/usr", "access": "rx", "comment": "system binaries and libraries" },
+    { "path": "/lib", "access": "rx", "comment": "system libraries (non-merged-usr)", "ignore_missing": true },
+    { "path": "/lib64", "access": "rx", "ignore_missing": true },
+    { "path": "/etc", "access": "r", "comment": "system configuration" },
+    { "path": "/dev/null", "access": "rw" },
+    { "path": "/dev/urandom", "access": "r" },
+    { "path": "/proc/self", "access": "r", "comment": "process introspection" },
+
+    { "path": "${home}/.rustup", "access": "rx", "comment": "Rust toolchains" },
+    { "path": "${CARGO_HOME:-${dataDir}/cargo}", "access": "rwcd", "comment": "cargo cache and registry" },
+    { "path": "${cacheDir}/cargo", "access": "rwcd", "create_dir": "0700" },
+
+    { "path": "${PWD}", "access": "rwcd", "refer": true, "comment": "project working directory" },
+    { "path": "${tmpDir}", "access": "rwcd", "comment": "temporary files" }
+  ],
+  "net": [
+    { "port": 443, "access": "connect", "comment": "HTTPS (crates.io)" },
+    { "port": 53, "access": "connect", "comment": "DNS resolution" }
+  ],
+  "ipc": {
+    "abstract_unix": "deny",
+    "signal": "deny"
+  }
+}
