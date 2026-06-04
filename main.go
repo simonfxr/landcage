@@ -1,83 +1,113 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 
+	"github.com/alexflint/go-arg"
 	"github.com/simonfxr/landcage/policy"
 )
 
+type args struct {
+	DryRun bool     `arg:"--dry-run" help:"show resolved rules without enforcing"`
+	RO     []string `arg:"--ro,separate" help:"additional read-only path (rx)"`
+	RW     []string `arg:"--rw,separate" help:"additional read-write path (rwxcd+refer)"`
+	Policy string   `arg:"--policy,-p" help:"policy JSON file"`
+	Cmd    []string `arg:"positional" help:"command to execute (after --)"`
+}
+
+func (args) Description() string {
+	return "landcage - Landlock-based process sandbox\n\nExamples:\n  landcage -p policy.json -- cmd args...\n  landcage --rw /project --ro /usr -- cmd args..."
+}
+
 func main() {
-	dryRun := flag.Bool("dry-run", false, "show resolved rules without enforcing")
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: landcage [flags] <policy.json> -- <command> [args...]\n\nFlags:\n")
-		flag.PrintDefaults()
+	// Split at "--" for go-arg (it doesn't handle -- natively for positionals)
+	goArgs, cmdArgs := splitAtDash(os.Args[1:])
+	os.Args = append([]string{os.Args[0]}, goArgs...)
+
+	var a args
+	p := arg.MustParse(&a)
+	a.Cmd = cmdArgs
+
+	if !a.DryRun && len(a.Cmd) == 0 {
+		p.Fail("command is required (use -- to separate)")
 	}
 
-	// Parse flags up to "--"
-	var flagArgs []string
-	rest := os.Args[1:]
-	for i, a := range rest {
-		if a == "--" {
-			flagArgs = rest[:i]
-			rest = rest[i:]
-			break
+	// Build policy
+	var pol *policy.Policy
+	if a.Policy != "" {
+		var err error
+		pol, err = policy.Load(a.Policy)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
+			os.Exit(1)
 		}
-	}
-	if flagArgs == nil {
-		flagArgs = rest
-		rest = nil
-	}
-
-	flag.CommandLine.Parse(flagArgs)
-
-	if flag.NArg() < 1 {
-		flag.Usage()
-		os.Exit(2)
+	} else if len(a.RO) > 0 || len(a.RW) > 0 {
+		pol = &policy.Policy{Name: "cli"}
+	} else {
+		p.Fail("either --policy or --rw/--ro flags are required")
 	}
 
-	policyFile := flag.Arg(0)
-
-	// Load and validate policy
-	p, err := policy.Load(policyFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
-		os.Exit(1)
+	// Append CLI path flags to policy
+	for _, path := range a.RO {
+		pol.FS = append(pol.FS, policy.FSRule{
+			Path:          path,
+			Access:        "rx",
+			IgnoreMissing: true,
+		})
+	}
+	for _, path := range a.RW {
+		pol.FS = append(pol.FS, policy.FSRule{
+			Path:          path,
+			Access:        "rwxcd",
+			Refer:         true,
+			IgnoreMissing: true,
+		})
 	}
 
-	if *dryRun {
-		if err := policy.DryRun(p, os.Stdout); err != nil {
+	if a.DryRun {
+		if err := policy.DryRun(pol, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	// Need command after "--"
-	if len(rest) < 2 { // rest[0] is "--"
-		flag.Usage()
-		os.Exit(2)
-	}
-	cmdArgs := rest[1:]
-
 	// Enforce sandbox
-	if err := policy.Enforce(p); err != nil {
+	if err := policy.Enforce(pol); err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Exec child process
-	bin, err := exec.LookPath(cmdArgs[0])
+	bin, err := exec.LookPath(a.Cmd[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 		os.Exit(127)
 	}
 
-	if err := syscall.Exec(bin, cmdArgs, os.Environ()); err != nil {
+	if err := syscall.Exec(bin, a.Cmd, os.Environ()); err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: exec: %v\n", err)
 		os.Exit(126)
 	}
+}
+
+func splitAtDash(args []string) (before, after []string) {
+	for i, a := range args {
+		if a == "--" {
+			return args[:i], args[i+1:]
+		}
+	}
+	// No "--" found — check if last args look like a command (heuristic: no leading -)
+	// For safety, treat everything as flags/options
+	return args, nil
+}
+
+func (a args) Usage() string {
+	var sb strings.Builder
+	sb.WriteString("landcage [options] -- <command> [args...]\n")
+	return sb.String()
 }
