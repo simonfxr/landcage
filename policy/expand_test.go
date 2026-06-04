@@ -19,8 +19,8 @@ func TestExpandLiteral(t *testing.T) {
 		{"/usr/bin/ls", "/usr/bin/ls"},
 		{"no vars here", "no vars here"},
 		{"/path/with spaces/file", "/path/with spaces/file"},
-		{"$notavar", "$notavar"},       // lone $ without { is literal
-		{"${", "${"},                     // incomplete — no matching }, but only 2 chars
+		{"$notavar", "$notavar"}, // lone $ without { is literal
+		{"${", "${"},             // incomplete — no matching }, but only 2 chars
 	}
 	for _, tt := range tests {
 		// The "${" case will error, skip it from the "want" checks

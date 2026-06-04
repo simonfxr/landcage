@@ -9,10 +9,10 @@ import (
 
 // Policy is the top-level sandbox policy.
 type Policy struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	FS          []FSRule `json:"fs,omitempty"`
-	Net         []NetRule `json:"net,omitempty"`
+	Name        string     `json:"name"`
+	Description string     `json:"description,omitempty"`
+	FS          []FSRule   `json:"fs,omitempty"`
+	Net         []NetRule  `json:"net,omitempty"`
 	IPC         *IPCConfig `json:"ipc,omitempty"`
 }
 

@@ -265,9 +265,9 @@ func (e *Expander) resolve(name string) string {
 // splitDefault splits "VAR:-default" into (name, default, true)
 // or "VAR" into (name, "", false).
 func splitDefault(s string) (string, string, bool) {
-	idx := strings.Index(s, ":-")
-	if idx < 0 {
+	before, after, ok := strings.Cut(s, ":-")
+	if !ok {
 		return s, "", false
 	}
-	return s[:idx], s[idx+2:], true
+	return before, after, true
 }
