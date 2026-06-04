@@ -1,3 +1,4 @@
 landcage
 cover.out
 *.test
+/result*

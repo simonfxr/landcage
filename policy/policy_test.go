@@ -313,8 +313,14 @@ func TestResolveMixedVarAndLiteralGlob(t *testing.T) {
 }
 
 func TestResolveRoot(t *testing.T) {
+	// Test that globbing works in a directory (not scanning CWD by mistake)
+	dir := t.TempDir()
+	os.MkdirAll(dir+"/aaa", 0755)
+	os.MkdirAll(dir+"/aab", 0755)
+	os.MkdirAll(dir+"/bbb", 0755)
+
 	exp := testExpander(nil)
-	ep, err := exp.Expand("/u*")
+	ep, err := exp.Expand(dir + "/aa*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,14 +328,8 @@ func TestResolveRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
-	for _, p := range paths {
-		if p == "/usr" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected /usr in glob results, got %v", paths)
+	if len(paths) != 2 {
+		t.Errorf("expected 2 matches, got %v", paths)
 	}
 }
 
