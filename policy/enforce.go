@@ -46,7 +46,7 @@ func Enforce(p *Policy, opts *Options) error {
 	}
 
 	// Build config for detected ABI version
-	cfg, err := buildConfig(abi, scopedFlags)
+	cfg, err := buildConfig(abi, scopedFlags, p.Net.Allow)
 	if err != nil {
 		return fmt.Errorf("building landlock config: %w", err)
 	}
@@ -67,7 +67,7 @@ func Enforce(p *Policy, opts *Options) error {
 
 	// Build network rules
 	var netRules []ll.Rule
-	for _, r := range p.Net {
+	for _, r := range p.Net.Rules {
 		netRules = append(netRules, buildNetRules(&r)...)
 	}
 
@@ -150,7 +150,7 @@ func resolveScopes(ipc *IPCConfig, abi int) (ll.ScopedSet, error) {
 }
 
 // buildConfig creates a landlock Config for the detected ABI version.
-func buildConfig(abi int, scoped ll.ScopedSet) (ll.Config, error) {
+func buildConfig(abi int, scoped ll.ScopedSet, netAllow bool) (ll.Config, error) {
 	idx := abi
 	if idx >= len(abiConfigs) {
 		idx = len(abiConfigs) - 1
@@ -161,7 +161,7 @@ func buildConfig(abi int, scoped ll.ScopedSet) (ll.Config, error) {
 	if info.fs != 0 {
 		args = append(args, info.fs)
 	}
-	if info.net != 0 {
+	if info.net != 0 && !netAllow {
 		args = append(args, info.net)
 	}
 	if scoped != 0 {

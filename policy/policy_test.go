@@ -8,6 +8,20 @@ import (
 	llsys "github.com/landlock-lsm/go-landlock/landlock/syscall"
 )
 
+func TestParseNetAllow(t *testing.T) {
+	data := []byte(`{"name": "test", "net": "allow"}`)
+	p, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.Net.Allow {
+		t.Error("expected Net.Allow = true")
+	}
+	if len(p.Net.Rules) != 0 {
+		t.Errorf("expected no net rules, got %d", len(p.Net.Rules))
+	}
+}
+
 func TestParseValid(t *testing.T) {
 	data := []byte(`{
 		"name": "test",
@@ -32,8 +46,8 @@ func TestParseValid(t *testing.T) {
 	if len(p.FS) != 3 {
 		t.Errorf("len(fs) = %d, want 3", len(p.FS))
 	}
-	if len(p.Net) != 2 {
-		t.Errorf("len(net) = %d, want 2", len(p.Net))
+	if len(p.Net.Rules) != 2 {
+		t.Errorf("len(net) = %d, want 2", len(p.Net.Rules))
 	}
 }
 

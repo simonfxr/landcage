@@ -13,8 +13,32 @@ type Policy struct {
 	Description string              `json:"description,omitempty"`
 	Env         map[string]EnvEntry `json:"env,omitempty"`
 	FS          []FSRule            `json:"fs,omitempty"`
-	Net         []NetRule           `json:"net,omitempty"`
+	Net         NetConfig           `json:"net"`
 	IPC         *IPCConfig          `json:"ipc,omitempty"`
+}
+
+// NetConfig holds network rules or "allow" to skip network restriction.
+type NetConfig struct {
+	Allow bool      // true = unrestricted network
+	Rules []NetRule // per-port rules (used when Allow is false)
+}
+
+func (nc *NetConfig) UnmarshalJSON(data []byte) error {
+	if string(data) == `"allow"` {
+		nc.Allow = true
+		return nil
+	}
+	return json.Unmarshal(data, &nc.Rules)
+}
+
+func (nc NetConfig) MarshalJSON() ([]byte, error) {
+	if nc.Allow {
+		return json.Marshal("allow")
+	}
+	if nc.Rules == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(nc.Rules)
 }
 
 // StringBag is a slice that unmarshals from either a single string or an array.
@@ -142,7 +166,7 @@ func (p *Policy) Validate() error {
 			return fmt.Errorf("fs rule %d: %w", i, err)
 		}
 	}
-	for i, r := range p.Net {
+	for i, r := range p.Net.Rules {
 		if err := r.validate(); err != nil {
 			return fmt.Errorf("net rule %d: %w", i, err)
 		}

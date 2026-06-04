@@ -94,9 +94,11 @@ func DryRun(p *Policy, opts *Options, w io.Writer) error {
 	}
 
 	// Network rules
-	if len(p.Net) > 0 {
+	if p.Net.Allow {
+		fmt.Fprintf(w, "Network: allow (unrestricted)\n\n")
+	} else if len(p.Net.Rules) > 0 {
 		fmt.Fprintf(w, "Network rules:\n")
-		for i, r := range p.Net {
+		for i, r := range p.Net.Rules {
 			fmt.Fprintf(w, "  [%d] port %d → %s\n", i, r.Port, r.Access)
 		}
 		fmt.Fprintln(w)

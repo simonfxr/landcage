@@ -274,8 +274,17 @@ path (symlink or direct) reaching the same inode are covered by a single rule.
 
 ## Network Rules (`net`)
 
-The `net` array controls TCP bind and connect operations. **All TCP operations
+The `net` field controls TCP bind and connect operations. **All TCP operations
 are denied by default** unless explicitly permitted.
+
+### Allowing All Network
+
+Set `"net": "allow"` to leave TCP completely unrestricted (network access rights
+are not declared as handled, so Landlock does not restrict them):
+
+```json
+{ "net": "allow" }
+```
 
 ### Rule Object
 
