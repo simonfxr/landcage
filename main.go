@@ -68,8 +68,11 @@ func main() {
 		})
 	}
 
+	// Create options from process environment
+	opts := policy.DefaultOptions()
+
 	if a.DryRun {
-		if err := policy.DryRun(pol, os.Stdout); err != nil {
+		if err := policy.DryRun(pol, &opts, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 			os.Exit(1)
 		}
@@ -77,7 +80,14 @@ func main() {
 	}
 
 	// Enforce sandbox
-	if err := policy.Enforce(pol); err != nil {
+	if err := policy.Enforce(pol, &opts); err != nil {
+		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Apply environment changes (after Enforce so fs expansion uses original env)
+	env, err := policy.ApplyEnv(pol, &opts)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 		os.Exit(1)
 	}
@@ -89,7 +99,7 @@ func main() {
 		os.Exit(127)
 	}
 
-	if err := syscall.Exec(bin, a.Cmd, os.Environ()); err != nil {
+	if err := syscall.Exec(bin, a.Cmd, env.ToSlice()); err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: exec: %v\n", err)
 		os.Exit(126)
 	}

@@ -29,7 +29,7 @@ var abiConfigs = []struct {
 
 // Enforce applies the policy: expands variables, creates directories,
 // resolves globs, and enforces the Landlock ruleset.
-func Enforce(p *Policy) error {
+func Enforce(p *Policy, opts *Options) error {
 	// Detect kernel ABI version
 	abi, err := llsys.LandlockGetABIVersion()
 	if err != nil {
@@ -52,7 +52,7 @@ func Enforce(p *Policy) error {
 	}
 
 	// Build filesystem rules
-	exp := NewExpander()
+	exp := NewExpander(opts)
 	var fsRules []ll.Rule
 	for i, r := range p.FS {
 		rules, err := buildFSRules(exp, &r)

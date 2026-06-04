@@ -9,11 +9,82 @@ import (
 
 // Policy is the top-level sandbox policy.
 type Policy struct {
-	Name        string     `json:"name"`
-	Description string     `json:"description,omitempty"`
-	FS          []FSRule   `json:"fs,omitempty"`
-	Net         []NetRule  `json:"net,omitempty"`
-	IPC         *IPCConfig `json:"ipc,omitempty"`
+	Name        string              `json:"name"`
+	Description string              `json:"description,omitempty"`
+	Env         map[string]EnvEntry `json:"env,omitempty"`
+	FS          []FSRule            `json:"fs,omitempty"`
+	Net         []NetRule           `json:"net,omitempty"`
+	IPC         *IPCConfig          `json:"ipc,omitempty"`
+}
+
+// StringBag is a slice that unmarshals from either a single string or an array.
+type StringBag []string
+
+func (sb *StringBag) UnmarshalJSON(data []byte) error {
+	if len(data) > 0 && data[0] == '[' {
+		var arr []string
+		if err := json.Unmarshal(data, &arr); err != nil {
+			return err
+		}
+		*sb = arr
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	*sb = []string{s}
+	return nil
+}
+
+func (sb StringBag) MarshalJSON() ([]byte, error) {
+	if len(sb) == 1 {
+		return json.Marshal(sb[0])
+	}
+	return json.Marshal([]string(sb))
+}
+
+// EnvEntry defines how to modify an environment variable.
+type EnvEntry struct {
+	Value   *string   // set mode: non-nil = set to this value
+	Unset   bool      // unset mode
+	Prepend StringBag // path op: prepend these
+	Append  StringBag // path op: append these
+	Remove  StringBag // path op: remove these (exact match)
+	Sep     string    // path op: separator (default ":")
+}
+
+func (e *EnvEntry) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		e.Unset = true
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		e.Value = &s
+		return nil
+	}
+	var obj struct {
+		Prepend StringBag `json:"prepend"`
+		Append  StringBag `json:"append"`
+		Remove  StringBag `json:"remove"`
+		Sep     string    `json:"sep"`
+	}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return fmt.Errorf("env entry must be string, null, or {prepend,append,remove,sep}: %w", err)
+	}
+	e.Prepend = obj.Prepend
+	e.Append = obj.Append
+	e.Remove = obj.Remove
+	e.Sep = obj.Sep
+	if e.Sep == "" {
+		e.Sep = ":"
+	}
+	return nil
+}
+
+func (e *EnvEntry) IsPathOp() bool {
+	return len(e.Prepend) > 0 || len(e.Append) > 0 || len(e.Remove) > 0
 }
 
 // FSRule defines access to a filesystem path.
@@ -79,6 +150,11 @@ func (p *Policy) Validate() error {
 	if p.IPC != nil {
 		if err := p.IPC.validate(); err != nil {
 			return fmt.Errorf("ipc: %w", err)
+		}
+	}
+	for name := range p.Env {
+		if name == "" {
+			return fmt.Errorf("env: empty variable name")
 		}
 	}
 	return nil

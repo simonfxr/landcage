@@ -6,12 +6,15 @@ import (
 )
 
 // testExpander creates an Expander with controlled builtins (no real env dependency).
-func testExpander(builtins map[string]string) *Expander {
-	return &Expander{builtins: builtins}
+func testExpander(builtins map[string]string, env Environ) *Expander {
+	if env == nil {
+		env = ProcessEnv()
+	}
+	return &Expander{builtins: builtins, env: env}
 }
 
 func TestExpandLiteral(t *testing.T) {
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	tests := []struct {
 		in, want string
 	}{
@@ -46,7 +49,7 @@ func TestExpandSimpleVar(t *testing.T) {
 	os.Setenv("_LC_TEST_A", "/foo")
 	defer os.Unsetenv("_LC_TEST_A")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	tests := []struct {
 		in, want string
 	}{
@@ -71,7 +74,7 @@ func TestExpandBuiltinPrecedence(t *testing.T) {
 	os.Setenv("home", "/env-home")
 	defer os.Unsetenv("home")
 
-	exp := testExpander(map[string]string{"home": "/builtin-home"})
+	exp := testExpander(map[string]string{"home": "/builtin-home"}, nil)
 	got, err := exp.Expand("${home}")
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +86,7 @@ func TestExpandBuiltinPrecedence(t *testing.T) {
 
 func TestExpandUnsetNoDefault(t *testing.T) {
 	os.Unsetenv("_LC_UNSET_VAR")
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	_, err := exp.Expand("${_LC_UNSET_VAR}")
 	if err == nil {
 		t.Error("expected error for unset var without default")
@@ -92,7 +95,7 @@ func TestExpandUnsetNoDefault(t *testing.T) {
 
 func TestExpandDefaultLiteral(t *testing.T) {
 	os.Unsetenv("_LC_UNSET")
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	tests := []struct {
 		in, want string
 	}{
@@ -117,7 +120,7 @@ func TestExpandDefaultUsedOnlyWhenEmpty(t *testing.T) {
 	os.Setenv("_LC_SET", "/real")
 	defer os.Unsetenv("_LC_SET")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	got, err := exp.Expand("${_LC_SET:-/fallback}")
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +135,7 @@ func TestExpandNestedDefault(t *testing.T) {
 	os.Setenv("_LC_INNER", "/inner")
 	defer os.Unsetenv("_LC_INNER")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	tests := []struct {
 		in, want string
 	}{
@@ -158,7 +161,7 @@ func TestExpandDeeplyNested(t *testing.T) {
 	os.Setenv("_LC_C", "/deep")
 	defer os.Unsetenv("_LC_C")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	got, err := exp.Expand("${_LC_A:-${_LC_B:-${_LC_C}}}")
 	if err != nil {
 		t.Fatal(err)
@@ -170,7 +173,7 @@ func TestExpandDeeplyNested(t *testing.T) {
 
 func TestExpandNestedDefaultWithBuiltin(t *testing.T) {
 	os.Unsetenv("_LC_CARGO_HOME")
-	exp := testExpander(map[string]string{"dataDir": "/home/user/.local/share"})
+	exp := testExpander(map[string]string{"dataDir": "/home/user/.local/share"}, nil)
 	got, err := exp.Expand("${_LC_CARGO_HOME:-${dataDir}/cargo}")
 	if err != nil {
 		t.Fatal(err)
@@ -184,7 +187,7 @@ func TestExpandSegmentProvenance(t *testing.T) {
 	os.Setenv("_LC_GLOB", "foo*bar")
 	defer os.Unsetenv("_LC_GLOB")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 
 	// Variable with glob chars: FromVar=true, text is raw (no escaping)
 	got, err := exp.Expand("${_LC_GLOB}")
@@ -234,7 +237,7 @@ func TestExpandGlobInDefault(t *testing.T) {
 	os.Setenv("_LC_STAR", "a*b")
 	defer os.Unsetenv("_LC_STAR")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	// Nested var in fallback: FromVar=true
 	got, err := exp.Expand("${_LC_X:-${_LC_STAR}}")
 	if err != nil {
@@ -250,7 +253,7 @@ func TestExpandGlobInDefault(t *testing.T) {
 
 func TestExpandLiteralGlobInDefault(t *testing.T) {
 	os.Unsetenv("_LC_X")
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	// Literal * in fallback: FromVar=false
 	got, err := exp.Expand("${_LC_X:-/dev/dri/card*}")
 	if err != nil {
@@ -268,7 +271,7 @@ func TestExpandQuestionMark(t *testing.T) {
 	os.Setenv("_LC_Q", "a?b")
 	defer os.Unsetenv("_LC_Q")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	got, err := exp.Expand("${_LC_Q}")
 	if err != nil {
 		t.Fatal(err)
@@ -285,7 +288,7 @@ func TestExpandBracket(t *testing.T) {
 	os.Setenv("_LC_BR", "a[0]b")
 	defer os.Unsetenv("_LC_BR")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	got, err := exp.Expand("${_LC_BR}")
 	if err != nil {
 		t.Fatal(err)
@@ -302,7 +305,7 @@ func TestExpandBackslashInValue(t *testing.T) {
 	os.Setenv("_LC_BS", `a\b`)
 	defer os.Unsetenv("_LC_BS")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	got, err := exp.Expand("${_LC_BS}")
 	if err != nil {
 		t.Fatal(err)
@@ -313,7 +316,7 @@ func TestExpandBackslashInValue(t *testing.T) {
 }
 
 func TestExpandUnterminatedBrace(t *testing.T) {
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	cases := []string{
 		"${FOO",
 		"${FOO:-${BAR}",
@@ -329,7 +332,7 @@ func TestExpandUnterminatedBrace(t *testing.T) {
 }
 
 func TestExpandDollarLiteral(t *testing.T) {
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	tests := []struct {
 		in, want string
 	}{
@@ -357,7 +360,7 @@ func TestExpandMultipleVars(t *testing.T) {
 	defer os.Unsetenv("_LC_A")
 	defer os.Unsetenv("_LC_B")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	got, err := exp.Expand("/${_LC_A}/${_LC_B}/end")
 	if err != nil {
 		t.Fatal(err)
@@ -373,7 +376,7 @@ func TestExpandAdjacentVars(t *testing.T) {
 	defer os.Unsetenv("_LC_X")
 	defer os.Unsetenv("_LC_Y")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	got, err := exp.Expand("${_LC_X}${_LC_Y}")
 	if err != nil {
 		t.Fatal(err)
@@ -387,7 +390,7 @@ func TestExpandColonInVarName(t *testing.T) {
 	os.Setenv("_LC_COLON:VAR", "val")
 	defer os.Unsetenv("_LC_COLON:VAR")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	got, err := exp.Expand("${_LC_COLON:VAR}")
 	if err != nil {
 		t.Fatal(err)
@@ -399,7 +402,7 @@ func TestExpandColonInVarName(t *testing.T) {
 
 func TestExpandDefaultContainsColon(t *testing.T) {
 	os.Unsetenv("_LC_X")
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	got, err := exp.Expand("${_LC_X:-a:-b}")
 	if err != nil {
 		t.Fatal(err)
@@ -410,7 +413,7 @@ func TestExpandDefaultContainsColon(t *testing.T) {
 }
 
 func TestExpandEmptyVarName(t *testing.T) {
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	_, err := exp.Expand("${}")
 	if err == nil {
 		t.Error("expected error for empty var name")
@@ -418,7 +421,7 @@ func TestExpandEmptyVarName(t *testing.T) {
 }
 
 func TestExpandEmptyBuiltin(t *testing.T) {
-	exp := testExpander(map[string]string{"emptyBuiltin": ""})
+	exp := testExpander(map[string]string{"emptyBuiltin": ""}, nil)
 	_, err := exp.Expand("${emptyBuiltin}")
 	if err == nil {
 		t.Error("expected error for empty builtin without default")
@@ -434,12 +437,16 @@ func TestExpandEmptyBuiltin(t *testing.T) {
 }
 
 func TestExpandRealWorldPatterns(t *testing.T) {
-	os.Setenv("HOME", "/home/user")
-	os.Unsetenv("XDG_DATA_HOME")
-	os.Unsetenv("CARGO_HOME")
-	defer os.Setenv("HOME", os.Getenv("HOME"))
-
-	exp := NewExpander()
+	env := Environ{
+		"HOME": "/home/user",
+	}
+	opts := &Options{
+		Env:  env,
+		Dirs: ResolveDirs(env),
+		UID:  "1000",
+		User: "user",
+	}
+	exp := NewExpander(opts)
 
 	tests := []struct {
 		name string
@@ -449,7 +456,7 @@ func TestExpandRealWorldPatterns(t *testing.T) {
 		{"simple home", "${home}/.config", "/home/user/.config"},
 		{"dataDir default", "${dataDir}", "/home/user/.local/share"},
 		{"cargo with fallback", "${CARGO_HOME:-${dataDir}/cargo}", "/home/user/.local/share/cargo"},
-		{"tmpDir", "${tmpDir}", firstNonEmpty(os.Getenv("TMPDIR"), "/tmp")},
+		{"tmpDir", "${tmpDir}", "/tmp"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

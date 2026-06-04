@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	llsys "github.com/landlock-lsm/go-landlock/landlock/syscall"
 )
 
 // DryRun resolves all rules and prints what would be enforced, without
 // actually applying the Landlock ruleset.
-func DryRun(p *Policy, w io.Writer) error {
+func DryRun(p *Policy, opts *Options, w io.Writer) error {
 	abi, err := llsys.LandlockGetABIVersion()
 	if err != nil {
 		abi = 0
@@ -22,7 +23,7 @@ func DryRun(p *Policy, w io.Writer) error {
 	}
 	fmt.Fprintf(w, "Landlock ABI: %d\n\n", abi)
 
-	exp := NewExpander()
+	exp := NewExpander(opts)
 
 	// Filesystem rules
 	if len(p.FS) > 0 {
@@ -119,6 +120,38 @@ func DryRun(p *Policy, w io.Writer) error {
 	}
 	fmt.Fprintf(w, "  abstract_unix: %s (kernel support: %s)\n", abstractUnix, scopeSupported)
 	fmt.Fprintf(w, "  signal: %s (kernel support: %s)\n", signal, scopeSupported)
+
+	// Environment
+	if len(p.Env) > 0 {
+		fmt.Fprintf(w, "\nEnvironment:\n")
+		for name, entry := range p.Env {
+			if entry.Unset {
+				fmt.Fprintf(w, "  %s: UNSET\n", name)
+			} else if entry.Value != nil {
+				expanded, err := exp.Expand(*entry.Value)
+				if err != nil {
+					return fmt.Errorf("env %s: %w", name, err)
+				}
+				fmt.Fprintf(w, "  %s = %q\n", name, expanded.String())
+			} else {
+				// Path operation
+				var ops []string
+				for _, p := range entry.Prepend {
+					expanded, _ := exp.Expand(p)
+					ops = append(ops, fmt.Sprintf("prepend %q", expanded.String()))
+				}
+				for _, r := range entry.Remove {
+					expanded, _ := exp.Expand(r)
+					ops = append(ops, fmt.Sprintf("remove %q", expanded.String()))
+				}
+				for _, a := range entry.Append {
+					expanded, _ := exp.Expand(a)
+					ops = append(ops, fmt.Sprintf("append %q", expanded.String()))
+				}
+				fmt.Fprintf(w, "  %s: %s (sep=%q)\n", name, strings.Join(ops, ", "), entry.Sep)
+			}
+		}
+	}
 
 	return nil
 }

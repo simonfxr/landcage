@@ -65,7 +65,8 @@ func TestExpandSimple(t *testing.T) {
 	os.Setenv("LANDCAGE_TEST_VAR", "hello")
 	defer os.Unsetenv("LANDCAGE_TEST_VAR")
 
-	exp := NewExpander()
+	opts := DefaultOptions()
+	exp := NewExpander(&opts)
 	got, err := exp.Expand("/prefix/${LANDCAGE_TEST_VAR}/suffix")
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +78,8 @@ func TestExpandSimple(t *testing.T) {
 
 func TestExpandDefault(t *testing.T) {
 	os.Unsetenv("LANDCAGE_UNSET_VAR")
-	exp := NewExpander()
+	opts := DefaultOptions()
+	exp := NewExpander(&opts)
 	got, err := exp.Expand("${LANDCAGE_UNSET_VAR:-/fallback}")
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +94,8 @@ func TestExpandNested(t *testing.T) {
 	os.Setenv("LANDCAGE_INNER", "/inner")
 	defer os.Unsetenv("LANDCAGE_INNER")
 
-	exp := NewExpander()
+	opts := DefaultOptions()
+	exp := NewExpander(&opts)
 	got, err := exp.Expand("${LANDCAGE_OUTER:-${LANDCAGE_INNER}/sub}")
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +106,8 @@ func TestExpandNested(t *testing.T) {
 }
 
 func TestExpandBuiltins(t *testing.T) {
-	exp := NewExpander()
+	opts := DefaultOptions()
+	exp := NewExpander(&opts)
 	got, err := exp.Expand("${home}")
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +121,8 @@ func TestExpandEscapesGlob(t *testing.T) {
 	os.Setenv("LANDCAGE_GLOB", "foo*bar")
 	defer os.Unsetenv("LANDCAGE_GLOB")
 
-	exp := NewExpander()
+	opts := DefaultOptions()
+	exp := NewExpander(&opts)
 	got, err := exp.Expand("/dir/${LANDCAGE_GLOB}")
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +142,8 @@ func TestExpandEscapesGlob(t *testing.T) {
 
 func TestExpandUnset(t *testing.T) {
 	os.Unsetenv("LANDCAGE_NOPE")
-	exp := NewExpander()
+	opts := DefaultOptions()
+	exp := NewExpander(&opts)
 	_, err := exp.Expand("${LANDCAGE_NOPE}")
 	if err == nil {
 		t.Error("expected error for unset var without default")
@@ -146,7 +152,8 @@ func TestExpandUnset(t *testing.T) {
 
 func TestExpandEmptyDefault(t *testing.T) {
 	os.Unsetenv("LANDCAGE_EMPTY")
-	exp := NewExpander()
+	opts := DefaultOptions()
+	exp := NewExpander(&opts)
 	got, err := exp.Expand("${LANDCAGE_EMPTY:-}")
 	if err != nil {
 		t.Fatal(err)
@@ -162,7 +169,7 @@ func TestResolveGlob(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, name), nil, 0644)
 	}
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	ep, err := exp.Expand(dir + "/*.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -178,7 +185,7 @@ func TestResolveGlob(t *testing.T) {
 
 func TestResolveNoMatch(t *testing.T) {
 	dir := t.TempDir()
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	ep, err := exp.Expand(dir + "/*.xyz")
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +200,7 @@ func TestResolveNoMatch(t *testing.T) {
 }
 
 func TestResolveNoMeta(t *testing.T) {
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	ep, err := exp.Expand("/usr/bin/ls")
 	if err != nil {
 		t.Fatal(err)
@@ -208,7 +215,7 @@ func TestResolveNoMeta(t *testing.T) {
 }
 
 func TestResolveMiddleComponent(t *testing.T) {
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	ep, err := exp.Expand("/dev/*/card0")
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +235,7 @@ func TestResolveVarWithGlobCharsIsLiteral(t *testing.T) {
 	os.Setenv("_LC_LITERAL", "file*name")
 	defer os.Unsetenv("_LC_LITERAL")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	ep, err := exp.Expand(dir + "/${_LC_LITERAL}")
 	if err != nil {
 		t.Fatal(err)
@@ -253,7 +260,7 @@ func TestResolveVarWithGlobCharsInDirIsLiteral(t *testing.T) {
 	os.Setenv("_LC_STARDIR", "a*b")
 	defer os.Unsetenv("_LC_STARDIR")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	ep, err := exp.Expand(dir + "/${_LC_STARDIR}/file.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -273,7 +280,7 @@ func TestResolveBracketGlob(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, name), nil, 0644)
 	}
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	ep, err := exp.Expand(dir + "/card[0-2]")
 	if err != nil {
 		t.Fatal(err)
@@ -297,7 +304,7 @@ func TestResolveMixedVarAndLiteralGlob(t *testing.T) {
 	os.Setenv("_LC_PFX", "a*b_")
 	defer os.Unsetenv("_LC_PFX")
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	ep, err := exp.Expand(dir + "/${_LC_PFX}*.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -319,7 +326,7 @@ func TestResolveRoot(t *testing.T) {
 	os.MkdirAll(dir+"/aab", 0755)
 	os.MkdirAll(dir+"/bbb", 0755)
 
-	exp := testExpander(nil)
+	exp := testExpander(nil, nil)
 	ep, err := exp.Expand(dir + "/aa*")
 	if err != nil {
 		t.Fatal(err)

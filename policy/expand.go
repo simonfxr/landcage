@@ -3,7 +3,6 @@ package policy
 import (
 	"fmt"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strings"
 )
@@ -149,26 +148,25 @@ func hasGlobMeta(s string) bool {
 // Expander handles variable expansion in path strings.
 type Expander struct {
 	builtins map[string]string
+	env      Environ
 }
 
-// NewExpander creates an Expander with built-in variables resolved.
-func NewExpander() *Expander {
-	home := os.Getenv("HOME")
-	uid := ""
-	if u, err := user.Current(); err == nil {
-		uid = u.Uid
-	}
-
+// NewExpander creates an Expander from Options.
+func NewExpander(opts *Options) *Expander {
 	return &Expander{
 		builtins: map[string]string{
-			"home":       home,
-			"configDir":  firstNonEmpty(os.Getenv("XDG_CONFIG_HOME"), home+"/.config"),
-			"dataDir":    firstNonEmpty(os.Getenv("XDG_DATA_HOME"), home+"/.local/share"),
-			"cacheDir":   firstNonEmpty(os.Getenv("XDG_CACHE_HOME"), home+"/.cache"),
-			"stateDir":   firstNonEmpty(os.Getenv("XDG_STATE_HOME"), home+"/.local/state"),
-			"runtimeDir": firstNonEmpty(os.Getenv("XDG_RUNTIME_DIR"), "/run/user/"+uid),
-			"tmpDir":     firstNonEmpty(os.Getenv("TMPDIR"), "/tmp"),
+			"home":       opts.Dirs.Home,
+			"uid":        opts.UID,
+			"user":       opts.User,
+			"pwd":        opts.Dirs.Pwd,
+			"configDir":  opts.Dirs.ConfigDir,
+			"dataDir":    opts.Dirs.DataDir,
+			"cacheDir":   opts.Dirs.CacheDir,
+			"stateDir":   opts.Dirs.StateDir,
+			"runtimeDir": opts.Dirs.RuntimeDir,
+			"tmpDir":     opts.Dirs.TmpDir,
 		},
+		env: opts.Env,
 	}
 }
 
@@ -259,7 +257,7 @@ func (e *Expander) resolve(name string) string {
 	if v, ok := e.builtins[name]; ok {
 		return v
 	}
-	return os.Getenv(name)
+	return e.env[name]
 }
 
 // splitDefault splits "VAR:-default" into (name, default, true)

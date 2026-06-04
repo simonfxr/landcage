@@ -27,11 +27,86 @@ enforced via Landlock. Designed to be adaptable to other OS sandboxing mechanism
 |-------|------|----------|-------------|
 | `name` | string | yes | Short identifier for the policy |
 | `description` | string | no | Human-readable description |
+| `env` | object | no | Environment variable modifications |
 | `fs` | array | no | Filesystem access rules |
 | `net` | array | no | Network access rules |
 | `ipc` | object | no | IPC isolation settings |
 
 One file = one complete policy for one program. No composition or inheritance.
+
+---
+
+## Environment Variables (`env`)
+
+The `env` object modifies environment variables before exec. Useful for removing
+sensitive credentials or adjusting PATH-style variables.
+
+```json
+{
+  "env": {
+    "FOO": "literal-value",
+    "EXPANDED": "${home}/.config/app",
+    "OPENAI_API_KEY": null,
+    "EMPTY_VAR": "",
+    "PATH": {
+      "prepend": "/extra/bin",
+      "append": ["/opt/bin", "/more/bin"],
+      "remove": "/unwanted/bin",
+      "sep": ":"
+    }
+  }
+}
+```
+
+### Value Types
+
+| JSON Value | Effect |
+|------------|--------|
+| `"string"` | Set variable to expanded string value |
+| `null` | Unset (remove from environment) |
+| `""` | Set to empty string (different from unset) |
+| `{...}` | Path-style manipulation (see below) |
+
+### Path Operations
+
+For PATH-style variables (colon-separated lists), use an object:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `prepend` | string \| string[] | Add element(s) to the front |
+| `append` | string \| string[] | Add element(s) to the end |
+| `remove` | string \| string[] | Remove matching element(s) (exact match) |
+| `sep` | string | Separator (default `":"`) |
+
+Order of operations: split by separator → remove matches → prepend → append → join.
+
+Example with `PATH=/a:/b:/c`:
+```json
+{ "prepend": "/x", "append": "/y", "remove": "/b" }
+```
+Result: `/x:/a:/c:/y`
+
+### Variable Expansion in Values
+
+Values support `${VAR}` and `${VAR:-default}` syntax. Expansion uses the
+**original** environment (before any `env` changes are applied):
+
+```json
+{
+  "env": {
+    "FOO": "new",
+    "BAR": "${FOO}"
+  }
+}
+```
+Here `BAR` gets the original value of `FOO`, not `"new"`.
+
+### Order of Operations
+
+1. Filesystem path expansion (uses original env)
+2. Landlock enforcement
+3. Environment variable expansion and application
+4. Exec child process
 
 ---
 
@@ -136,6 +211,9 @@ Built-ins take precedence over env vars with the same name.
 | Variable | Expands to |
 |----------|-----------|
 | `home` | `$HOME` |
+| `uid` | Numeric user ID (from `getuid`) |
+| `user` | Username (from `/etc/passwd`) |
+| `pwd` | Current working directory (from `getcwd`) |
 | `configDir` | `${XDG_CONFIG_HOME:-$HOME/.config}` |
 | `dataDir` | `${XDG_DATA_HOME:-$HOME/.local/share}` |
 | `cacheDir` | `${XDG_CACHE_HOME:-$HOME/.cache}` |

@@ -68,7 +68,7 @@ See [LANDLOCK_SANDBOX_POLICY.md](LANDLOCK_SANDBOX_POLICY.md) for the full specif
 
 **IPC:** `"deny"` (hard), `"allow"` (explicit), or omit for best-effort deny
 
-**Variables:** `${home}`, `${configDir}`, `${dataDir}`, `${cacheDir}`, `${stateDir}`, `${runtimeDir}`, `${tmpDir}`, `${ENV_VAR}`, `${VAR:-default}`
+**Variables:** `${home}`, `${uid}`, `${user}`, `${pwd}`, `${configDir}`, `${dataDir}`, `${cacheDir}`, `${stateDir}`, `${runtimeDir}`, `${tmpDir}`, `${ENV_VAR}`, `${VAR:-default}`
 
 ## Requirements
 
