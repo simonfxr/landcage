@@ -7,10 +7,24 @@ import (
 	"strings"
 )
 
+// UnshareConfig controls Linux namespace isolation.
+type UnshareConfig struct {
+	User      bool `json:"user,omitempty"`       // CLONE_NEWUSER + map current uid/gid
+	PID       bool `json:"pid,omitempty"`        // CLONE_NEWPID (implies fork/re-exec)
+	Cgroup    bool `json:"cgroup,omitempty"`     // CLONE_NEWCGROUP
+	MountProc bool `json:"mount_proc,omitempty"` // CLONE_NEWNS + remount /proc (requires pid)
+}
+
+// Enabled returns true if any namespace isolation is configured.
+func (u *UnshareConfig) Enabled() bool {
+	return u != nil && (u.User || u.PID || u.Cgroup || u.MountProc)
+}
+
 // Policy is the top-level sandbox policy.
 type Policy struct {
 	Name        string              `json:"name"`
 	Description string              `json:"description,omitempty"`
+	Unshare     *UnshareConfig      `json:"unshare,omitempty"`
 	Env         map[string]EnvEntry `json:"env,omitempty"`
 	FS          []FSRule            `json:"fs,omitempty"`
 	Net         NetConfig           `json:"net"`
@@ -160,6 +174,11 @@ func Parse(data []byte) (*Policy, error) {
 func (p *Policy) Validate() error {
 	if p.Name == "" {
 		return fmt.Errorf("policy: name is required")
+	}
+	if p.Unshare != nil {
+		if p.Unshare.MountProc && !p.Unshare.PID {
+			return fmt.Errorf("unshare: mount_proc requires pid")
+		}
 	}
 	for i, r := range p.FS {
 		if err := r.validate(); err != nil {

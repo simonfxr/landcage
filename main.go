@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -24,8 +25,11 @@ func (args) Description() string {
 }
 
 func main() {
+	// Save original args before modification (needed for re-exec)
+	origArgs := os.Args[1:]
+
 	// Split at "--" for go-arg (it doesn't handle -- natively for positionals)
-	goArgs, cmdArgs := splitAtDash(os.Args[1:])
+	goArgs, cmdArgs := splitAtDash(origArgs)
 	os.Args = append([]string{os.Args[0]}, goArgs...)
 
 	var a args
@@ -49,6 +53,46 @@ func main() {
 		pol = &policy.Policy{Name: "cli"}
 	} else {
 		p.Fail("either --policy or --rw/--ro flags are required")
+	}
+
+	// Namespace isolation via clone(2). The child process is created in all new
+	// namespaces simultaneously — it's PID 1 in the PID ns and root (uid 0) in
+	// the user ns (giving it capabilities for mount). Falls back to Landlock-only
+	// if namespace creation fails (e.g. nested sandbox).
+	if pol.Unshare.Enabled() && !isChild {
+		code, ok := forkChild(pol.Unshare, origArgs)
+		if ok {
+			os.Exit(code)
+		}
+		fmt.Fprintf(os.Stderr, "landcage: namespace unavailable (nested sandbox?), continuing with landlock only\n")
+	}
+
+	// Child (PID 1): mount /proc, drop caps, signal success to parent.
+	// LockOSThread ensures cap drop + ForkExec happen on the same thread
+	// (caps are per-thread on Linux).
+	if isChild {
+		runtime.LockOSThread()
+		setupFD := -1
+		if fdStr := os.Getenv(setupFDEnvKey); fdStr != "" {
+			fmt.Sscanf(fdStr, "%d", &setupFD)
+		}
+		os.Unsetenv(childEnvKey)
+		os.Unsetenv(setupFDEnvKey)
+
+		if pol.Unshare != nil && pol.Unshare.MountProc {
+			if err := mountProc(); err != nil {
+				os.Exit(1) // parent detects via pipe EOF → falls back
+			}
+		}
+		// Drop all capabilities — no longer needed after mount.
+		// Prevents target from inheriting CAP_SYS_ADMIN.
+		dropAllCaps()
+
+		// Signal parent that setup succeeded, then close the pipe.
+		if setupFD >= 0 {
+			syscall.Write(setupFD, []byte("ok"))
+			syscall.Close(setupFD)
+		}
 	}
 
 	// Append CLI path flags to policy
@@ -92,11 +136,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Exec child process
+	// Exec target
 	bin, err := exec.LookPath(a.Cmd[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 		os.Exit(127)
+	}
+
+	// If we're PID 1 (child/reaper), use ForkExec + reaper loop to reap orphans.
+	if isChild {
+		os.Exit(reaperExec(bin, a.Cmd, env.ToSlice()))
 	}
 
 	if err := syscall.Exec(bin, a.Cmd, env.ToSlice()); err != nil {
@@ -111,8 +160,6 @@ func splitAtDash(args []string) (before, after []string) {
 			return args[:i], args[i+1:]
 		}
 	}
-	// No "--" found — check if last args look like a command (heuristic: no leading -)
-	// For safety, treat everything as flags/options
 	return args, nil
 }
 

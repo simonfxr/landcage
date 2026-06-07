@@ -22,6 +22,39 @@ func TestParseNetAllow(t *testing.T) {
 	}
 }
 
+func TestParseUnshare(t *testing.T) {
+	data := []byte(`{"name": "test", "unshare": {"user": true, "pid": true, "cgroup": true, "mount_proc": true}, "net": "allow"}`)
+	p, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Unshare == nil {
+		t.Fatal("expected Unshare to be set")
+	}
+	if !p.Unshare.User || !p.Unshare.PID || !p.Unshare.Cgroup || !p.Unshare.MountProc {
+		t.Errorf("unexpected unshare config: %+v", p.Unshare)
+	}
+}
+
+func TestParseUnshareOmitted(t *testing.T) {
+	data := []byte(`{"name": "test", "net": "allow"}`)
+	p, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Unshare.Enabled() {
+		t.Error("expected Unshare.Enabled() = false when omitted")
+	}
+}
+
+func TestValidateUnshareMountProcRequiresPID(t *testing.T) {
+	data := []byte(`{"name": "test", "unshare": {"mount_proc": true}, "net": "allow"}`)
+	_, err := Parse(data)
+	if err == nil {
+		t.Error("expected error: mount_proc without pid")
+	}
+}
+
 func TestParseValid(t *testing.T) {
 	data := []byte(`{
 		"name": "test",

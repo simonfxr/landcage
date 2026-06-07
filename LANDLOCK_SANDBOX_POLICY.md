@@ -27,12 +27,77 @@ enforced via Landlock. Designed to be adaptable to other OS sandboxing mechanism
 |-------|------|----------|-------------|
 | `name` | string | yes | Short identifier for the policy |
 | `description` | string | no | Human-readable description |
+| `unshare` | object | no | Linux namespace isolation |
 | `env` | object | no | Environment variable modifications |
 | `fs` | array | no | Filesystem access rules |
 | `net` | array | no | Network access rules |
 | `ipc` | object | no | IPC isolation settings |
 
 One file = one complete policy for one program. No composition or inheritance.
+
+---
+
+## Namespace Isolation (`unshare`)
+
+The `unshare` object controls Linux namespace isolation. When configured, landcage
+re-executes itself inside new namespaces before applying Landlock and exec'ing the
+target command. This replaces the need for an external `unshare` wrapper.
+
+```json
+{
+  "unshare": {
+    "user": true,
+    "pid": true,
+    "cgroup": true,
+    "mount_proc": true
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `user` | bool | `false` | Create new user namespace, map current UID/GID |
+| `pid` | bool | `false` | Create new PID namespace (child becomes PID 1) |
+| `cgroup` | bool | `false` | Create new cgroup namespace |
+| `mount_proc` | bool | `false` | Create mount namespace + remount `/proc` (requires `pid`) |
+
+### Behavior
+
+- **`user`**: Creates a `CLONE_NEWUSER` namespace and maps the current UID/GID to
+  the same values inside. No privilege escalation — the process remains the same
+  user. Enables unprivileged use of other namespace types.
+
+- **`pid`**: Creates a `CLONE_NEWPID` namespace. The sandboxed process tree is
+  isolated — it cannot see or signal processes outside its namespace. The first
+  process in the namespace becomes PID 1.
+
+- **`cgroup`**: Creates a `CLONE_NEWCGROUP` namespace. The process gets a
+  virtualized view of `/proc/self/cgroup`.
+
+- **`mount_proc`**: Implies a mount namespace (`CLONE_NEWNS`). Remounts `/proc`
+  so it reflects only the new PID namespace. Requires `pid: true`.
+
+### Implementation
+
+landcage uses a re-exec pattern: it spawns itself as a child process with
+`clone(2)` flags, then in the child performs any mount setup before continuing
+with Landlock enforcement and exec. The parent forwards signals and propagates
+the child's exit code. This works with pure Go (no CGO).
+
+### Example
+
+Equivalent of `unshare -UpC --fork --mount-proc --map-current-user`:
+
+```json
+{
+  "unshare": {
+    "user": true,
+    "pid": true,
+    "cgroup": true,
+    "mount_proc": true
+  }
+}
+```
 
 ---
 
