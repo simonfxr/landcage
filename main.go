@@ -13,15 +13,16 @@ import (
 )
 
 type args struct {
-	DryRun bool     `arg:"--dry-run" help:"show resolved rules without enforcing"`
-	RO     []string `arg:"--ro,separate" help:"additional read-only path (rx)"`
-	RW     []string `arg:"--rw,separate" help:"additional read-write path (rwxcd+refer)"`
-	Policy string   `arg:"--policy,-p" help:"policy JSON file"`
-	Cmd    []string `arg:"positional" help:"command to execute (after --)"`
+	DryRun     bool     `arg:"--dry-run" help:"show resolved rules without enforcing"`
+	RO         []string `arg:"--ro,separate" help:"additional read-only path (rx)"`
+	RW         []string `arg:"--rw,separate" help:"additional read-write path (rwxcd+refer)"`
+	Policy     string   `arg:"--policy,-p" help:"policy JSON file"`
+	PolicyJSON bool     `arg:"--policy-json-from-env" help:"read policy JSON from LANDCAGE_POLICY_JSON env var (cleared for child)"`
+	Cmd        []string `arg:"positional" help:"command to execute (after --)"`
 }
 
 func (args) Description() string {
-	return "landcage - Landlock-based process sandbox\n\nExamples:\n  landcage -p policy.json -- cmd args...\n  landcage --rw /project --ro /usr -- cmd args..."
+	return "landcage - Landlock-based process sandbox\n\nExamples:\n  landcage -p policy.json -- cmd args...\n  landcage --policy-json-from-env -- cmd args...\n  landcage --rw /project --ro /usr -- cmd args..."
 }
 
 func main() {
@@ -42,6 +43,9 @@ func main() {
 
 	// Build policy
 	var pol *policy.Policy
+	if a.Policy != "" && a.PolicyJSON {
+		p.Fail("--policy and --policy-json-from-env are mutually exclusive")
+	}
 	if a.Policy != "" {
 		var err error
 		pol, err = policy.Load(a.Policy)
@@ -49,10 +53,22 @@ func main() {
 			fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 			os.Exit(1)
 		}
+	} else if a.PolicyJSON {
+		raw := os.Getenv("LANDCAGE_POLICY_JSON")
+		if raw == "" {
+			fmt.Fprintln(os.Stderr, "landcage: LANDCAGE_POLICY_JSON environment variable is not set")
+			os.Exit(1)
+		}
+		var err error
+		pol, err = policy.Parse([]byte(raw))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
+			os.Exit(1)
+		}
 	} else if len(a.RO) > 0 || len(a.RW) > 0 {
 		pol = &policy.Policy{Name: "cli"}
 	} else {
-		p.Fail("either --policy or --rw/--ro flags are required")
+		p.Fail("either --policy, --policy-json-from-env, or --rw/--ro flags are required")
 	}
 
 	// Namespace isolation via clone(2). The child process is created in all new
@@ -112,7 +128,13 @@ func main() {
 		})
 	}
 
-	// Create options from process environment
+	// Create options from process environment.
+	// Clear LANDCAGE_POLICY_JSON now — after any forkChild so the child got it,
+	// but before DefaultOptions captures the env, so the target never sees it.
+	if a.PolicyJSON {
+		os.Unsetenv("LANDCAGE_POLICY_JSON")
+	}
+
 	opts := policy.DefaultOptions()
 
 	if a.DryRun {
