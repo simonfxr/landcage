@@ -404,13 +404,16 @@ func TestFSAccessSetFileRejectsDelete(t *testing.T) {
 }
 
 func TestFSAccessSetDirAllFlags(t *testing.T) {
-	r := &FSRule{Path: "/tmp", Access: "rwxcd", Refer: true, IoctlDev: true}
+	r := &FSRule{Path: "/tmp", Access: "rwxcdu", Refer: true, IoctlDev: true}
 	access, err := fsAccessSet(r, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if access == 0 {
 		t.Error("expected non-zero access set")
+	}
+	if access&llsys.AccessFSResolveUnix == 0 {
+		t.Error("RESOLVE_UNIX should be set for 'u' access")
 	}
 }
 
@@ -426,6 +429,17 @@ func TestFSAccessSetFileReadOnly(t *testing.T) {
 	}
 	if access&llsys.AccessFSReadFile == 0 {
 		t.Error("READ_FILE should be set for file rule")
+	}
+}
+
+func TestFSAccessSetFileUnixSocketResolve(t *testing.T) {
+	r := &FSRule{Path: "/tmp/sock", Access: "u"}
+	access, err := fsAccessSet(r, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if access != llsys.AccessFSResolveUnix {
+		t.Errorf("got access %d, want RESOLVE_UNIX %d", access, llsys.AccessFSResolveUnix)
 	}
 }
 

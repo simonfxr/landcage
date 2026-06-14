@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/alexflint/go-arg v1.6.1
-	github.com/landlock-lsm/go-landlock v0.8.1
+	github.com/landlock-lsm/go-landlock v0.9.0
 )
 
 require (

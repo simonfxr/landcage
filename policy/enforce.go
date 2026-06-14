@@ -25,6 +25,7 @@ var abiConfigs = []struct {
 	{fs: (1 << 16) - 1, net: (1 << 2) - 1, scoped: (1 << 2) - 1}, // V6
 	{fs: (1 << 16) - 1, net: (1 << 2) - 1, scoped: (1 << 2) - 1}, // V7
 	{fs: (1 << 16) - 1, net: (1 << 2) - 1, scoped: (1 << 2) - 1}, // V8
+	{fs: (1 << 17) - 1, net: (1 << 2) - 1, scoped: (1 << 2) - 1}, // V9
 }
 
 // Enforce applies the policy: expands variables, creates directories,
@@ -254,7 +255,7 @@ func fsAccessSet(r *FSRule, isDir bool) (ll.AccessFSSet, error) {
 			}
 			access |= llsys.AccessFSRemoveFile | llsys.AccessFSRemoveDir
 		case 'u':
-			// RESOLVE_UNIX — not yet in go-landlock (V9), skip for now
+			access |= llsys.AccessFSResolveUnix
 		}
 	}
 	if r.Refer {
