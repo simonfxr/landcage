@@ -5,23 +5,21 @@ import (
 	"io"
 	"os"
 	"strings"
-
-	llsys "github.com/landlock-lsm/go-landlock/landlock/syscall"
 )
 
 // DryRun resolves all rules and prints what would be enforced, without
 // actually applying the Landlock ruleset.
 func DryRun(p *Policy, opts *Options, w io.Writer) error {
-	abi, err := llsys.LandlockGetABIVersion()
-	if err != nil {
-		abi = 0
+	feat, featErr := DetectFeatures()
+	if featErr != nil {
+		feat = LandlockFeatures{ABI: 0}
 	}
 
 	fmt.Fprintf(w, "Policy: %s\n", p.Name)
 	if p.Description != "" {
 		fmt.Fprintf(w, "Description: %s\n", p.Description)
 	}
-	fmt.Fprintf(w, "Landlock ABI: %d\n\n", abi)
+	fmt.Fprintf(w, "Kernel features: %s\n\n", feat.String())
 
 	exp := NewExpander(opts)
 
@@ -64,6 +62,12 @@ func DryRun(p *Policy, opts *Options, w io.Writer) error {
 				return fmt.Errorf("fs rule %d: no matches for %s", i, pathStr)
 			}
 
+			// Compute warning once per rule, not per resolved path.
+			warning := ""
+			if unsupported := feat.ValidateFSAccess(&r); len(unsupported) > 0 {
+				warning = fmt.Sprintf("  [WARN] unsupported: %s", strings.Join(unsupported, "; "))
+			}
+
 			for _, path := range paths {
 				fi, err := os.Stat(path)
 				if err != nil {
@@ -87,7 +91,13 @@ func DryRun(p *Policy, opts *Options, w io.Writer) error {
 					flags += " +ioctl_dev"
 				}
 
-				fmt.Fprintf(w, "  [%d] %s (%s) → %s\n", i, path, kind, flags)
+				// Show downgrade notes for flags silently omitted due to kernel ABI.
+				note := ""
+				if strings.ContainsRune(r.Access, 'w') && !feat.SupportsTruncate() {
+					note = fmt.Sprintf(" [note: truncate unavailable on ABI %d]", feat.ABI)
+				}
+
+				fmt.Fprintf(w, "  [%d] %s (%s) → %s%s%s\n", i, path, kind, flags, warning, note)
 			}
 		}
 		fmt.Fprintln(w)
@@ -97,7 +107,11 @@ func DryRun(p *Policy, opts *Options, w io.Writer) error {
 	if p.Net.Allow {
 		fmt.Fprintf(w, "Network: allow (unrestricted)\n\n")
 	} else if len(p.Net.Rules) > 0 {
-		fmt.Fprintf(w, "Network rules:\n")
+		netWarn := ""
+		if !feat.SupportsNet() {
+			netWarn = fmt.Sprintf(" [WARN: network requires ABI >= 4, kernel has ABI %d]", feat.ABI)
+		}
+		fmt.Fprintf(w, "Network rules:%s\n", netWarn)
 		for i, r := range p.Net.Rules {
 			fmt.Fprintf(w, "  [%d] port %d → %s\n", i, r.Port, r.Access)
 		}
@@ -117,11 +131,21 @@ func DryRun(p *Policy, opts *Options, w io.Writer) error {
 		}
 	}
 	scopeSupported := "yes"
-	if abi < 6 {
-		scopeSupported = "no (requires ABI >= 6)"
+	if !feat.SupportsScoped() {
+		scopeSupported = fmt.Sprintf("no (requires ABI >= 6, kernel has ABI %d)", feat.ABI)
 	}
-	fmt.Fprintf(w, "  abstract_unix: %s (kernel support: %s)\n", abstractUnix, scopeSupported)
-	fmt.Fprintf(w, "  signal: %s (kernel support: %s)\n", signal, scopeSupported)
+	auWarn := ""
+	sigWarn := ""
+	if !feat.SupportsScoped() && p.IPC != nil {
+		if p.IPC.AbstractUnix == "deny" {
+			auWarn = fmt.Sprintf(" [WARN: enforcement would fail on kernel ABI %d]", feat.ABI)
+		}
+		if p.IPC.Signal == "deny" {
+			sigWarn = fmt.Sprintf(" [WARN: enforcement would fail on kernel ABI %d]", feat.ABI)
+		}
+	}
+	fmt.Fprintf(w, "  abstract_unix: %s (kernel support: %s)%s\n", abstractUnix, scopeSupported, auWarn)
+	fmt.Fprintf(w, "  signal: %s (kernel support: %s)%s\n", signal, scopeSupported, sigWarn)
 
 	// Environment
 	if len(p.Env) > 0 {

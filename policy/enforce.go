@@ -4,59 +4,34 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 
 	ll "github.com/landlock-lsm/go-landlock/landlock"
 	llsys "github.com/landlock-lsm/go-landlock/landlock/syscall"
 )
 
-// ABI version to config mapping (max rights per version).
-var abiConfigs = []struct {
-	fs     ll.AccessFSSet
-	net    ll.AccessNetSet
-	scoped ll.ScopedSet
-}{
-	{},                                     // V0 — no support
-	{fs: (1 << 13) - 1},                    // V1
-	{fs: (1 << 14) - 1},                    // V2
-	{fs: (1 << 15) - 1},                    // V3
-	{fs: (1 << 15) - 1, net: (1 << 2) - 1}, // V4
-	{fs: (1 << 16) - 1, net: (1 << 2) - 1}, // V5
-	{fs: (1 << 16) - 1, net: (1 << 2) - 1, scoped: (1 << 2) - 1}, // V6
-	{fs: (1 << 16) - 1, net: (1 << 2) - 1, scoped: (1 << 2) - 1}, // V7
-	{fs: (1 << 16) - 1, net: (1 << 2) - 1, scoped: (1 << 2) - 1}, // V8
-	{fs: (1 << 17) - 1, net: (1 << 2) - 1, scoped: (1 << 2) - 1}, // V9
-}
-
 // Enforce applies the policy: expands variables, creates directories,
 // resolves globs, and enforces the Landlock ruleset.
 func Enforce(p *Policy, opts *Options) error {
-	// Detect kernel ABI version
-	abi, err := llsys.LandlockGetABIVersion()
-	if err != nil {
-		return fmt.Errorf("landlock not available: %w", err)
-	}
-	if abi < 1 {
-		return fmt.Errorf("landlock ABI version %d not usable", abi)
-	}
-
-	// Determine IPC scope flags
-	scopedFlags, err := resolveScopes(p.IPC, abi)
+	feat, err := DetectFeatures()
 	if err != nil {
 		return err
 	}
 
-	// Build config for detected ABI version
-	cfg, err := buildConfig(abi, scopedFlags, p.Net.Allow)
+	if err := validatePolicyFeatures(p, feat); err != nil {
+		return err
+	}
+
+	cfg, err := buildConfig(p, feat)
 	if err != nil {
 		return fmt.Errorf("building landlock config: %w", err)
 	}
 
-	// Build filesystem rules
 	exp := NewExpander(opts)
 	var fsRules []ll.Rule
 	for i, r := range p.FS {
-		rules, err := buildFSRules(exp, &r)
+		rules, err := buildFSRules(exp, &r, feat)
 		if err != nil {
 			if r.IgnoreMissing && isPathError(err) {
 				continue
@@ -66,13 +41,11 @@ func Enforce(p *Policy, opts *Options) error {
 		fsRules = append(fsRules, rules...)
 	}
 
-	// Build network rules
 	var netRules []ll.Rule
 	for _, r := range p.Net.Rules {
 		netRules = append(netRules, buildNetRules(&r)...)
 	}
 
-	// Combine and enforce
 	allRules := make([]ll.Rule, 0, len(fsRules)+len(netRules))
 	allRules = append(allRules, fsRules...)
 	allRules = append(allRules, netRules...)
@@ -82,64 +55,102 @@ func Enforce(p *Policy, opts *Options) error {
 	return nil
 }
 
+// validatePolicyFeatures checks that the policy does not request features
+// the current kernel cannot provide.
+func validatePolicyFeatures(p *Policy, feat LandlockFeatures) error {
+	for i, r := range p.FS {
+		unsupported := feat.ValidateFSAccess(&r)
+		if len(unsupported) > 0 {
+			return fmt.Errorf("fs rule %d (%s): unsupported access flags on kernel ABI %d: %s",
+				i, r.Path, feat.ABI, strings.Join(unsupported, "; "))
+		}
+	}
+
+	if err := feat.ValidateNet(&p.Net); err != nil {
+		return err
+	}
+
+	if err := feat.ValidateIPC(p.IPC); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// buildConfig creates a go-landlock Config with the correct handled access
+// sets for the detected kernel features. Only includes access categories
+// (net, scoped) that are requested by the policy.
+func buildConfig(p *Policy, feat LandlockFeatures) (ll.Config, error) {
+	args := []any{feat.MaxFSAccess()}
+
+	if len(p.Net.Rules) > 0 && feat.SupportsNet() {
+		args = append(args, feat.MaxNetAccess())
+	}
+
+	scopedFlags, err := resolveScopes(p.IPC, feat)
+	if err != nil {
+		return ll.Config{}, err
+	}
+	if scopedFlags != 0 {
+		args = append(args, scopedFlags)
+	}
+
+	cfg, err := ll.NewConfig(args...)
+	if err != nil {
+		return ll.Config{}, fmt.Errorf("new config: %w", err)
+	}
+	return *cfg, nil
+}
+
 type ipcMode int
 
 const (
-	ipcIncludeScopes       ipcMode = iota // kernel supports scopes, include them
-	ipcExcludeScopes                      // explicitly "allow" or kernel too old (best-effort)
-	ipcHardDenyUnavailable                // "deny" requested but kernel can't enforce
+	ipcIncludeScopes ipcMode = iota
+	ipcExcludeScopes
+	ipcHardDenyUnavailable
 )
 
-// resolveIPC determines how to handle IPC scopes (kept for testing).
-// Values: "" = best-effort deny, "deny" = hard deny, "allow" = no restriction.
-func resolveIPC(ipc *IPCConfig, abi int) ipcMode {
-	abstractUnix := "" // default: best-effort deny
+// resolveIPC determines how to handle IPC scopes.
+// Exists alongside resolveScopes only to support TestResolveIPC — the production
+// code path uses resolveScopes, which returns the actual ScopedSet bitmask.
+// Keep both in sync if IPC logic changes.
+func resolveIPC(ipc *IPCConfig, feat LandlockFeatures) ipcMode {
+	abstractUnix := ""
 	signal := ""
-
 	if ipc != nil {
 		abstractUnix = ipc.AbstractUnix
 		signal = ipc.Signal
 	}
 
-	// If everything is explicitly "allow", exclude scopes entirely
 	if abstractUnix == "allow" && signal == "allow" {
 		return ipcExcludeScopes
 	}
-
-	// If kernel doesn't support scopes (< V6)
-	if abi < 6 {
-		// Hard "deny" requested but can't enforce
+	if !feat.SupportsScoped() {
 		if abstractUnix == "deny" || signal == "deny" {
 			return ipcHardDenyUnavailable
 		}
-		// Best-effort (omitted/"") — silently skip on old kernel
 		return ipcExcludeScopes
 	}
-
-	// Kernel supports scopes
 	return ipcIncludeScopes
 }
 
-// resolveScopes returns the ScopedSet bitmask to use, or an error for hard deny on unsupported kernels.
-func resolveScopes(ipc *IPCConfig, abi int) (ll.ScopedSet, error) {
-	abstractUnix := "" // default: best-effort deny
+// resolveScopes returns the ScopedSet bitmask to use, or an error for
+// hard deny on unsupported kernels.
+func resolveScopes(ipc *IPCConfig, feat LandlockFeatures) (ll.ScopedSet, error) {
+	abstractUnix := ""
 	signal := ""
-
 	if ipc != nil {
 		abstractUnix = ipc.AbstractUnix
 		signal = ipc.Signal
 	}
 
-	// Check for hard deny on unsupported kernel
-	if abi < 6 {
+	if !feat.SupportsScoped() {
 		if abstractUnix == "deny" || signal == "deny" {
-			return 0, fmt.Errorf("ipc \"deny\" requires Landlock ABI >= 6 (detected: %d)", abi)
+			return 0, fmt.Errorf("ipc \"deny\" requires Landlock ABI >= 6 (detected: %d)", feat.ABI)
 		}
-		// Best-effort or allow — no scopes available
 		return 0, nil
 	}
 
-	// Kernel supports scopes — build per-flag bitmask
 	var scoped ll.ScopedSet
 	if abstractUnix != "allow" {
 		scoped |= llsys.ScopeAbstractUnixSocket
@@ -150,33 +161,7 @@ func resolveScopes(ipc *IPCConfig, abi int) (ll.ScopedSet, error) {
 	return scoped, nil
 }
 
-// buildConfig creates a landlock Config for the detected ABI version.
-func buildConfig(abi int, scoped ll.ScopedSet, netAllow bool) (ll.Config, error) {
-	idx := abi
-	if idx >= len(abiConfigs) {
-		idx = len(abiConfigs) - 1
-	}
-	info := abiConfigs[idx]
-
-	var args []any
-	if info.fs != 0 {
-		args = append(args, info.fs)
-	}
-	if info.net != 0 && !netAllow {
-		args = append(args, info.net)
-	}
-	if scoped != 0 {
-		args = append(args, scoped)
-	}
-
-	cfg, err := ll.NewConfig(args...)
-	if err != nil {
-		return ll.Config{}, err
-	}
-	return *cfg, nil
-}
-
-func buildFSRules(exp *Expander, r *FSRule) ([]ll.Rule, error) {
+func buildFSRules(exp *Expander, r *FSRule, feat LandlockFeatures) ([]ll.Rule, error) {
 	ep, err := exp.Expand(r.Path)
 	if err != nil {
 		if r.IgnoreMissing {
@@ -220,7 +205,7 @@ func buildFSRules(exp *Expander, r *FSRule) ([]ll.Rule, error) {
 			}
 			return nil, err
 		}
-		access, err := fsAccessSet(r, fi.IsDir())
+		access, err := fsAccessSet(r, fi.IsDir(), feat)
 		if err != nil {
 			return nil, fmt.Errorf("path %s: %w", p, err)
 		}
@@ -229,7 +214,10 @@ func buildFSRules(exp *Expander, r *FSRule) ([]ll.Rule, error) {
 	return rules, nil
 }
 
-func fsAccessSet(r *FSRule, isDir bool) (ll.AccessFSSet, error) {
+// fsAccessSet translates a policy FSRule into a go-landlock AccessFSSet.
+// The feat parameter gates ABI-dependent flags (e.g., truncate is silently
+// dropped on pre-ABI-3 kernels so that write-only policies remain usable).
+func fsAccessSet(r *FSRule, isDir bool, feat LandlockFeatures) (ll.AccessFSSet, error) {
 	var access ll.AccessFSSet
 	for _, ch := range r.Access {
 		switch ch {
@@ -240,7 +228,10 @@ func fsAccessSet(r *FSRule, isDir bool) (ll.AccessFSSet, error) {
 				access |= llsys.AccessFSReadFile
 			}
 		case 'w':
-			access |= llsys.AccessFSWriteFile | llsys.AccessFSTruncate
+			access |= llsys.AccessFSWriteFile
+			if feat.SupportsTruncate() {
+				access |= llsys.AccessFSTruncate
+			}
 		case 'x':
 			access |= llsys.AccessFSExecute
 		case 'c':

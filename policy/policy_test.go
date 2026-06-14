@@ -389,7 +389,7 @@ func TestResolveRoot(t *testing.T) {
 
 func TestFSAccessSetFileRejectsCreate(t *testing.T) {
 	r := &FSRule{Path: "/tmp/f", Access: "rwc"}
-	_, err := fsAccessSet(r, false)
+	_, err := fsAccessSet(r, false, FeaturesForABI(9))
 	if err == nil {
 		t.Error("expected error for 'c' on file")
 	}
@@ -397,7 +397,7 @@ func TestFSAccessSetFileRejectsCreate(t *testing.T) {
 
 func TestFSAccessSetFileRejectsDelete(t *testing.T) {
 	r := &FSRule{Path: "/tmp/f", Access: "rd"}
-	_, err := fsAccessSet(r, false)
+	_, err := fsAccessSet(r, false, FeaturesForABI(9))
 	if err == nil {
 		t.Error("expected error for 'd' on file")
 	}
@@ -405,7 +405,7 @@ func TestFSAccessSetFileRejectsDelete(t *testing.T) {
 
 func TestFSAccessSetDirAllFlags(t *testing.T) {
 	r := &FSRule{Path: "/tmp", Access: "rwxcdu", Refer: true, IoctlDev: true}
-	access, err := fsAccessSet(r, true)
+	access, err := fsAccessSet(r, true, FeaturesForABI(9))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +419,7 @@ func TestFSAccessSetDirAllFlags(t *testing.T) {
 
 func TestFSAccessSetFileReadOnly(t *testing.T) {
 	r := &FSRule{Path: "/tmp/f", Access: "r"}
-	access, err := fsAccessSet(r, false)
+	access, err := fsAccessSet(r, false, FeaturesForABI(9))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,12 +434,51 @@ func TestFSAccessSetFileReadOnly(t *testing.T) {
 
 func TestFSAccessSetFileUnixSocketResolve(t *testing.T) {
 	r := &FSRule{Path: "/tmp/sock", Access: "u"}
-	access, err := fsAccessSet(r, false)
+	access, err := fsAccessSet(r, false, FeaturesForABI(9))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if access != llsys.AccessFSResolveUnix {
 		t.Errorf("got access %d, want RESOLVE_UNIX %d", access, llsys.AccessFSResolveUnix)
+	}
+}
+
+func TestFSAccessSetTruncateDowngrade(t *testing.T) {
+	// 'w' should include truncate on ABI >= 3
+	r := &FSRule{Path: "/tmp/f", Access: "w"}
+	access, err := fsAccessSet(r, false, FeaturesForABI(9))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if access&llsys.AccessFSTruncate == 0 {
+		t.Error("expected truncate to be set on ABI 9")
+	}
+	if access&llsys.AccessFSWriteFile == 0 {
+		t.Error("expected write_file to be set")
+	}
+
+	// On ABI 2, 'w' should only set write_file, silently dropping truncate
+	access, err = fsAccessSet(r, false, FeaturesForABI(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if access&llsys.AccessFSTruncate != 0 {
+		t.Error("expected truncate to NOT be set on ABI 2")
+	}
+	if access&llsys.AccessFSWriteFile == 0 {
+		t.Error("expected write_file to be set even on ABI 2")
+	}
+
+	// On ABI 1, same behavior
+	access, err = fsAccessSet(r, false, FeaturesForABI(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if access&llsys.AccessFSTruncate != 0 {
+		t.Error("expected truncate to NOT be set on ABI 1")
+	}
+	if access&llsys.AccessFSWriteFile == 0 {
+		t.Error("expected write_file to be set even on ABI 1")
 	}
 }
 
@@ -463,7 +502,7 @@ func TestResolveIPC(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveIPC(tt.ipc, tt.abi)
+			got := resolveIPC(tt.ipc, FeaturesForABI(tt.abi))
 			if got != tt.want {
 				t.Errorf("resolveIPC() = %d, want %d", got, tt.want)
 			}
@@ -473,7 +512,7 @@ func TestResolveIPC(t *testing.T) {
 
 func TestResolveScopesGranular(t *testing.T) {
 	// Mixed: deny abstract_unix but allow signal
-	scoped, err := resolveScopes(&IPCConfig{AbstractUnix: "deny", Signal: "allow"}, 8)
+	scoped, err := resolveScopes(&IPCConfig{AbstractUnix: "deny", Signal: "allow"}, FeaturesForABI(8))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,7 +524,7 @@ func TestResolveScopesGranular(t *testing.T) {
 	}
 
 	// Both default (best-effort deny)
-	scoped, err = resolveScopes(nil, 8)
+	scoped, err = resolveScopes(nil, FeaturesForABI(8))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +533,7 @@ func TestResolveScopesGranular(t *testing.T) {
 	}
 
 	// Old kernel, best-effort
-	scoped, err = resolveScopes(nil, 5)
+	scoped, err = resolveScopes(nil, FeaturesForABI(5))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +542,7 @@ func TestResolveScopesGranular(t *testing.T) {
 	}
 
 	// Old kernel, hard deny
-	_, err = resolveScopes(&IPCConfig{Signal: "deny"}, 5)
+	_, err = resolveScopes(&IPCConfig{Signal: "deny"}, FeaturesForABI(5))
 	if err == nil {
 		t.Error("expected error for hard deny on old kernel")
 	}

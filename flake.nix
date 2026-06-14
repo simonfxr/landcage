@@ -33,7 +33,6 @@
             "-w"
           ];
           buildFlags = [ "-trimpath" ];
-          tags = [ "landlocktsync" ];
         };
     in
     flib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (
