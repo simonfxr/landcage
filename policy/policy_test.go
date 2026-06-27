@@ -3,6 +3,7 @@ package policy
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	llsys "github.com/landlock-lsm/go-landlock/landlock/syscall"
@@ -81,6 +82,91 @@ func TestParseValid(t *testing.T) {
 	}
 	if len(p.Net.Rules) != 2 {
 		t.Errorf("len(net) = %d, want 2", len(p.Net.Rules))
+	}
+}
+
+func TestLoadRendersJ2Policy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json.j2")
+	if err := os.WriteFile(path, []byte(`{
+		"name": "templated-{{ var.name }}",
+		"fs": [
+			{% if env.LANDCAGE_TEMPLATE_INCLUDE_TMP %}
+			{"path": "{{ tmpDir }}", "access": "r"}
+			{% endif %}
+		],
+		"net": "allow"
+	}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := DefaultOptions()
+	opts.Env["LANDCAGE_TEMPLATE_INCLUDE_TMP"] = "1"
+	opts.Dirs.TmpDir = "/template-tmp"
+	opts.TemplateVars = map[string]string{"name": "policy"}
+
+	p, err := LoadWithOptions(path, &opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "templated-policy" {
+		t.Fatalf("name = %q", p.Name)
+	}
+	if len(p.FS) != 1 || p.FS[0].Path != "/template-tmp" {
+		t.Fatalf("unexpected fs rules: %+v", p.FS)
+	}
+}
+
+func TestRenderTemplateVars(t *testing.T) {
+	opts := DefaultOptions()
+	opts.TemplateVars = map[string]string{"name": "policy"}
+	opts.OptionalTemplateVars = map[string]string{"unused": "ok"}
+
+	got, err := RenderTemplate([]byte(`{"name": "{{ var.name }}"}`), &opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `{"name": "policy"}` {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestRenderTemplateMissingVarFailsEvenInUntakenBranch(t *testing.T) {
+	opts := DefaultOptions()
+
+	_, err := RenderTemplate([]byte(`{% if false %}{{ var.missing }}{% endif %}`), &opts)
+	if err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("expected missing template var error, got %v", err)
+	}
+}
+
+func TestRenderTemplateUnusedRequiredVarFails(t *testing.T) {
+	opts := DefaultOptions()
+	opts.TemplateVars = map[string]string{"unused": "value"}
+
+	_, err := RenderTemplate([]byte(`{"name": "static"}`), &opts)
+	if err == nil || !strings.Contains(err.Error(), "unused") {
+		t.Fatalf("expected unused required template var error, got %v", err)
+	}
+}
+
+func TestRenderTemplateOptionalVarMayBeUnused(t *testing.T) {
+	opts := DefaultOptions()
+	opts.OptionalTemplateVars = map[string]string{"unused": "value"}
+
+	_, err := RenderTemplate([]byte(`{"name": "static"}`), &opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRenderTemplateMentionedOptionalVarInUntakenBranchIsSatisfied(t *testing.T) {
+	opts := DefaultOptions()
+	opts.OptionalTemplateVars = map[string]string{"maybe": "value"}
+
+	_, err := RenderTemplate([]byte(`{% if false %}{{ var.maybe }}{% endif %}{"name": "static"}`), &opts)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

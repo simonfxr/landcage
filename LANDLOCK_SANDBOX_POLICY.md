@@ -37,6 +37,76 @@ One file = one complete policy for one program. No composition or inheritance.
 
 ---
 
+## Jinja Policy Templates (`.j2`)
+
+Policy files whose path ends in `.j2` are rendered as Jinja-style templates
+before the resulting JSON is parsed and validated. This is intended for
+instantiating a policy from explicit CLI-provided parameters while keeping
+environment access separate.
+
+Example `agent.json.j2`:
+
+```jinja
+{
+  "name": "agent-{{ var.profile }}",
+  "fs": [
+    { "path": "{{ configDir }}/landcage/{{ var.profile }}", "access": "r" }
+    {% if var.include_tmp %},
+    { "path": "{{ tmpDir }}", "access": "rwcd" }
+    {% endif %}
+  ],
+  "net": "allow"
+}
+```
+
+Instantiate it with:
+
+```sh
+landcage -p agent.json.j2 \
+  --var profile=default \
+  --optional-var include_tmp=1 \
+  -- agent
+```
+
+### Template Context
+
+| Name | Description |
+|------|-------------|
+| `var.NAME` / `var["NAME"]` | CLI template variable from `--var` or `--optional-var` |
+| `env.NAME` / `env["NAME"]` | Original process environment |
+| `home`, `uid`, `user`, `pwd`, `configDir`, `dataDir`, `cacheDir`, `stateDir`, `runtimeDir`, `tmpDir` | Same built-ins as `${...}` expansion |
+
+### Template Variable Rules
+
+- `--var KEY=VALUE` provides a **required** template variable.
+- Required variables must be mentioned in the template as `var.KEY` or
+  `var["KEY"]`; otherwise rendering fails.
+- `--optional-var KEY=VALUE` provides an optional template variable.
+- Optional variables may be unused.
+- Any `var.KEY` mentioned in the template must be provided by either `--var` or
+  `--optional-var`; otherwise rendering fails.
+- “Mentioned” is based on the parsed template, not the execution path. A
+  `var.KEY` inside an untaken `{% if %}` branch still counts as mentioned.
+- `var` is intentionally separate from `env`; use `env.NAME` to read an
+  environment variable in a template.
+
+### Supported Template Syntax
+
+The template engine is intentionally small and map-based:
+
+- `{{ expr }}` interpolation
+- `{% if %}`, `{% elif %}`, `{% else %}`, `{% endif %}`
+- `{% for item in list %}`, optional `{% else %}`, `{% endfor %}`
+- `{% raw %}` / `{% endraw %}`
+- dotted and indexed access (`var.name`, `env["HOME"]`, `list[0]`)
+- operators such as `and`, `or`, `not`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `in`,
+  `+`, `-`, `*`, `/`
+- tests: `is defined`, `is undefined`, `is none`, `is true`, `is false`
+
+Unsupported constructs fail rendering rather than being ignored.
+
+---
+
 ## Namespace Isolation (`unshare`)
 
 The `unshare` object controls Linux namespace isolation. When configured, landcage

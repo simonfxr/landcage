@@ -13,16 +13,18 @@ import (
 )
 
 type args struct {
-	DryRun     bool     `arg:"--dry-run" help:"show resolved rules without enforcing"`
-	RO         []string `arg:"--ro,separate" help:"additional read-only path (rx)"`
-	RW         []string `arg:"--rw,separate" help:"additional read-write path (rwxcd+refer)"`
-	Policy     string   `arg:"--policy,-p" help:"policy JSON file"`
-	PolicyJSON bool     `arg:"--policy-json-from-env" help:"read policy JSON from LANDCAGE_POLICY_JSON env var (cleared for child)"`
-	Cmd        []string `arg:"positional" help:"command to execute (after --)"`
+	DryRun           bool     `arg:"--dry-run" help:"show resolved rules without enforcing"`
+	RO               []string `arg:"--ro,separate" help:"additional read-only path (rx)"`
+	RW               []string `arg:"--rw,separate" help:"additional read-write path (rwxcd+refer)"`
+	Policy           string   `arg:"--policy,-p" help:"policy JSON file or .j2 template"`
+	PolicyJSON       bool     `arg:"--policy-json-from-env" help:"read policy JSON from LANDCAGE_POLICY_JSON env var (cleared for child)"`
+	TemplateVar      []string `arg:"--var,separate" help:"required template variable KEY=VALUE; must be mentioned as var.KEY in .j2 policy"`
+	OptionalTemplate []string `arg:"--optional-var,separate" help:"optional template variable KEY=VALUE; may be unused"`
+	Cmd              []string `arg:"positional" help:"command to execute (after --)"`
 }
 
 func (args) Description() string {
-	return "landcage - Landlock-based process sandbox\n\nExamples:\n  landcage -p policy.json -- cmd args...\n  landcage --policy-json-from-env -- cmd args...\n  landcage --rw /project --ro /usr -- cmd args..."
+	return "landcage - Landlock-based process sandbox\n\nExamples:\n  landcage -p policy.json -- cmd args...\n  landcage -p policy.json.j2 --var profile=default --optional-var debug=1 -- cmd args...\n  landcage --policy-json-from-env -- cmd args...\n  landcage --rw /project --ro /usr -- cmd args..."
 }
 
 func main() {
@@ -46,14 +48,30 @@ func main() {
 	if a.Policy != "" && a.PolicyJSON {
 		p.Fail("--policy and --policy-json-from-env are mutually exclusive")
 	}
+	templateVars, err := parseKeyValueFlags(a.TemplateVar, "--var")
+	if err != nil {
+		p.Fail(err.Error())
+	}
+	optionalTemplateVars, err := parseKeyValueFlags(a.OptionalTemplate, "--optional-var")
+	if err != nil {
+		p.Fail(err.Error())
+	}
+	if err := checkNoSharedKeys(templateVars, optionalTemplateVars, "--var", "--optional-var"); err != nil {
+		p.Fail(err.Error())
+	}
 	if a.Policy != "" {
-		var err error
-		pol, err = policy.Load(a.Policy)
+		opts := policy.DefaultOptions()
+		opts.TemplateVars = templateVars
+		opts.OptionalTemplateVars = optionalTemplateVars
+		pol, err = policy.LoadWithOptions(a.Policy, &opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 			os.Exit(1)
 		}
 	} else if a.PolicyJSON {
+		if len(templateVars) > 0 || len(optionalTemplateVars) > 0 {
+			p.Fail("--var/--optional-var require a .j2 policy template file")
+		}
 		raw := os.Getenv("LANDCAGE_POLICY_JSON")
 		if raw == "" {
 			fmt.Fprintln(os.Stderr, "landcage: LANDCAGE_POLICY_JSON environment variable is not set")
@@ -66,6 +84,9 @@ func main() {
 			os.Exit(1)
 		}
 	} else if len(a.RO) > 0 || len(a.RW) > 0 {
+		if len(templateVars) > 0 || len(optionalTemplateVars) > 0 {
+			p.Fail("--var/--optional-var require a .j2 policy template file")
+		}
 		pol = &policy.Policy{Name: "cli"}
 	} else {
 		p.Fail("either --policy, --policy-json-from-env, or --rw/--ro flags are required")
@@ -174,6 +195,30 @@ func main() {
 		fmt.Fprintf(os.Stderr, "landcage: exec: %v\n", err)
 		os.Exit(126)
 	}
+}
+
+func checkNoSharedKeys(a, b map[string]string, aName, bName string) error {
+	for key := range a {
+		if _, ok := b[key]; ok {
+			return fmt.Errorf("%s and %s cannot both specify %s", aName, bName, key)
+		}
+	}
+	return nil
+}
+
+func parseKeyValueFlags(values []string, flagName string) (map[string]string, error) {
+	out := make(map[string]string, len(values))
+	for _, value := range values {
+		key, val, ok := strings.Cut(value, "=")
+		if !ok || key == "" {
+			return nil, fmt.Errorf("%s must be KEY=VALUE", flagName)
+		}
+		if _, exists := out[key]; exists {
+			return nil, fmt.Errorf("%s specified more than once: %s", flagName, key)
+		}
+		out[key] = val
+	}
+	return out, nil
 }
 
 func splitAtDash(args []string) (before, after []string) {

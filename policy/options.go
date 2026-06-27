@@ -74,10 +74,12 @@ func ResolveDirs(env Environ) Dirs {
 
 // Options configures policy expansion and enforcement.
 type Options struct {
-	Env  Environ
-	Dirs Dirs
-	UID  string
-	User string
+	Env                  Environ
+	Dirs                 Dirs
+	UID                  string
+	User                 string
+	TemplateVars         map[string]string
+	OptionalTemplateVars map[string]string
 }
 
 // DefaultOptions creates Options from the current process environment.
