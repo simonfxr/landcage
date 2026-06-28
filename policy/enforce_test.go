@@ -142,6 +142,11 @@ func TestEnforceNetPort80(t *testing.T) {
 }
 
 func TestEnforceUnixNoU(t *testing.T) {
+	feat, err := DetectFeatures()
+	if err != nil || !feat.SupportsResolveUnix() {
+		t.Skip("requires Landlock ABI >= 9")
+	}
+
 	sockPath := filepath.Join(t.TempDir(), "test.sock")
 	ln := listenUnix(t, sockPath)
 	defer ln.Close()
@@ -153,6 +158,11 @@ func TestEnforceUnixNoU(t *testing.T) {
 }
 
 func TestEnforceUnixWithU(t *testing.T) {
+	feat, err := DetectFeatures()
+	if err != nil || !feat.SupportsResolveUnix() {
+		t.Skip("requires Landlock ABI >= 9")
+	}
+
 	sockPath := filepath.Join("/tmp", "landcage_test_u_"+strings.Replace(time.Now().Format("150405.000"), ".", "", 1)+".sock")
 	ln := listenUnix(t, sockPath)
 	defer ln.Close()
