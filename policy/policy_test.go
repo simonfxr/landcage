@@ -506,6 +506,30 @@ func TestResolveScopesGranular(t *testing.T) {
 	}
 }
 
+func TestDryRunNetOutput(t *testing.T) {
+	tests := []struct {
+		name   string
+		net    NetConfig
+		want   string
+	}{
+		{"deny", NetConfig{}, "Network: deny (all TCP blocked)"},
+		{"allow", NetConfig{Allow: true}, "Network: allow (unrestricted)"},
+		{"rules", NetConfig{Rules: []NetRule{{Port: 443, Access: "connect"}}}, "port 443"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Policy{Name: "test", Net: tt.net}
+			var buf bytes.Buffer
+			if err := DryRun(p, &buf); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(buf.String(), tt.want) {
+				t.Errorf("expected %q in output:\n%s", tt.want, buf.String())
+			}
+		})
+	}
+}
+
 func TestDryRunEnvOutput(t *testing.T) {
 	strPtr := func(s string) *string { return &s }
 	p := &Policy{

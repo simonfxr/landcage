@@ -83,7 +83,7 @@ func validatePolicyFeatures(p *Policy, feat LandlockFeatures) error {
 func buildConfig(p *Policy, feat LandlockFeatures) (ll.Config, error) {
 	args := []any{feat.MaxFSAccess()}
 
-	if len(p.Net.Rules) > 0 && feat.SupportsNet() {
+	if !p.Net.Allow && feat.SupportsNet() {
 		args = append(args, feat.MaxNetAccess())
 	}
 

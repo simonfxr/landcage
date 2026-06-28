@@ -101,9 +101,15 @@ func DryRun(p *Policy, w io.Writer) error {
 		}
 		fmt.Fprintf(w, "Network rules:%s\n", netWarn)
 		for i, r := range p.Net.Rules {
-			fmt.Fprintf(w, "  [%d] port %d → %s\n", i, r.Port, r.Access)
+			fmt.Fprintf(w, "  [%d] port %d \u2192 %s\n", i, r.Port, r.Access)
 		}
 		fmt.Fprintln(w)
+	} else {
+		netNote := ""
+		if !feat.SupportsNet() {
+			netNote = fmt.Sprintf(" [WARN: not enforced, requires ABI >= 4, kernel has ABI %d]", feat.ABI)
+		}
+		fmt.Fprintf(w, "Network: deny (all TCP blocked)%s\n\n", netNote)
 	}
 
 	// IPC

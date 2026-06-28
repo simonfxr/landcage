@@ -63,6 +63,16 @@ func main() {
 		}
 	}
 
+	// Dry-run without policy: just print detected kernel features.
+	if a.DryRun && a.Policy == "" && !a.PolicyJSON && !a.PolicyStdin && len(a.RO) == 0 && len(a.RW) == 0 {
+		pol := &policy.Policy{Name: "(none)"}
+		if err := policy.DryRun(pol, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Build policy
 	pol := buildPolicy(&a, p)
 
