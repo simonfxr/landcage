@@ -83,119 +83,149 @@ func (t *Template) ExecuteToString(ctx map[string]any) (string, error) {
 // anywhere in the template AST, including branches that are not taken at
 // execution time. For example, both {{ var.foo }} and {{ var["foo"] }} mention
 // "foo".
+//
+// Vars that appear in "is defined" or "is undefined" test expressions are
+// excluded: the template explicitly handles their absence.
 func (t *Template) ReferencedVarNames() map[string]struct{} {
 	refs := make(map[string]struct{})
-	collectVarRefsFromNodes(t.root.Nodes, refs)
+	exempt := make(map[string]struct{})
+	collectVarRefsFromNodes(t.root.Nodes, refs, exempt)
+	for name := range exempt {
+		delete(refs, name)
+	}
 	return refs
 }
 
-func collectVarRefsFromNodes(nodeList []nodes.Node, refs map[string]struct{}) {
+func collectVarRefsFromNodes(nodeList []nodes.Node, refs, exempt map[string]struct{}) {
 	for _, node := range nodeList {
 		switch n := node.(type) {
 		case *nodes.Output:
-			collectVarRefsFromExpr(n.Expression, refs)
+			collectVarRefsFromExpr(n.Expression, refs, exempt)
 			if n.Condition != nil {
-				collectVarRefsFromExpr(n.Condition, refs)
+				collectVarRefsFromExpr(n.Condition, refs, exempt)
 			}
 		case *nodes.ControlStructureBlock:
-			collectVarRefsFromControl(n.ControlStructure, refs)
+			collectVarRefsFromControl(n.ControlStructure, refs, exempt)
 		}
 	}
 }
 
-func collectVarRefsFromControl(cs nodes.ControlStructure, refs map[string]struct{}) {
+func collectVarRefsFromControl(cs nodes.ControlStructure, refs, exempt map[string]struct{}) {
 	switch n := cs.(type) {
 	case *ifNode:
 		for _, cond := range n.conditions {
-			collectVarRefsFromExpr(cond, refs)
+			collectVarRefsFromExpr(cond, refs, exempt)
 		}
 		for _, wrapper := range n.wrappers {
-			collectVarRefsFromNodes(wrapper.Nodes, refs)
+			collectVarRefsFromNodes(wrapper.Nodes, refs, exempt)
 		}
 		if n.elseWrapper != nil {
-			collectVarRefsFromNodes(n.elseWrapper.Nodes, refs)
+			collectVarRefsFromNodes(n.elseWrapper.Nodes, refs, exempt)
 		}
 	case *forNode:
-		collectVarRefsFromExpr(n.iter, refs)
+		collectVarRefsFromExpr(n.iter, refs, exempt)
 		if n.bodyWrapper != nil {
-			collectVarRefsFromNodes(n.bodyWrapper.Nodes, refs)
+			collectVarRefsFromNodes(n.bodyWrapper.Nodes, refs, exempt)
 		}
 		if n.elseWrapper != nil {
-			collectVarRefsFromNodes(n.elseWrapper.Nodes, refs)
+			collectVarRefsFromNodes(n.elseWrapper.Nodes, refs, exempt)
 		}
 	case *setNode:
-		collectVarRefsFromExpr(n.expr, refs)
+		collectVarRefsFromExpr(n.expr, refs, exempt)
 	}
 }
 
-func collectVarRefsFromExpr(expr nodes.Expression, refs map[string]struct{}) {
+func collectVarRefsFromExpr(expr nodes.Expression, refs, exempt map[string]struct{}) {
 	switch e := expr.(type) {
 	case *nodes.Variable:
 		collectVarRefsFromVariable(e, refs)
 		for _, part := range e.Parts {
 			for _, arg := range part.Args {
-				collectVarRefsFromExpr(arg, refs)
+				collectVarRefsFromExpr(arg, refs, exempt)
 			}
 			for _, arg := range part.Kwargs {
-				collectVarRefsFromExpr(arg, refs)
+				collectVarRefsFromExpr(arg, refs, exempt)
 			}
 		}
 	case *nodes.GetAttribute:
 		if isVarRoot(e.Node) {
 			refs[e.Attribute] = struct{}{}
 		}
-		collectVarRefsFromNode(e.Node, refs)
+		collectVarRefsFromNode(e.Node, refs, exempt)
 	case *nodes.GetItem:
 		if isVarRoot(e.Node) {
 			if s, ok := stringLiteralFromNode(e.Arg); ok {
 				refs[s] = struct{}{}
 			}
 		}
-		collectVarRefsFromNode(e.Node, refs)
-		collectVarRefsFromNode(e.Arg, refs)
+		collectVarRefsFromNode(e.Node, refs, exempt)
+		collectVarRefsFromNode(e.Arg, refs, exempt)
 	case *nodes.Call:
-		collectVarRefsFromNode(e.Func, refs)
+		collectVarRefsFromNode(e.Func, refs, exempt)
 		for _, arg := range e.Args {
-			collectVarRefsFromExpr(arg, refs)
+			collectVarRefsFromExpr(arg, refs, exempt)
 		}
 		for _, arg := range e.Kwargs {
-			collectVarRefsFromExpr(arg, refs)
+			collectVarRefsFromExpr(arg, refs, exempt)
 		}
 	case *nodes.Negation:
-		collectVarRefsFromExpr(e.Term, refs)
+		collectVarRefsFromExpr(e.Term, refs, exempt)
 	case *nodes.BinaryExpression:
-		collectVarRefsFromExpr(e.Left, refs)
-		collectVarRefsFromExpr(e.Right, refs)
+		collectVarRefsFromExpr(e.Left, refs, exempt)
+		collectVarRefsFromExpr(e.Right, refs, exempt)
 	case *nodes.UnaryExpression:
-		collectVarRefsFromExpr(e.Term, refs)
+		collectVarRefsFromExpr(e.Term, refs, exempt)
 	case *nodes.List:
 		for _, item := range e.Val {
-			collectVarRefsFromExpr(item, refs)
+			collectVarRefsFromExpr(item, refs, exempt)
 		}
 	case *nodes.FilteredExpression:
-		collectVarRefsFromExpr(e.Expression, refs)
+		collectVarRefsFromExpr(e.Expression, refs, exempt)
 		for _, filter := range e.Filters {
 			for _, arg := range filter.Args {
-				collectVarRefsFromExpr(arg, refs)
+				collectVarRefsFromExpr(arg, refs, exempt)
 			}
 			for _, arg := range filter.Kwargs {
-				collectVarRefsFromExpr(arg, refs)
+				collectVarRefsFromExpr(arg, refs, exempt)
 			}
 		}
 	case *nodes.TestExpression:
-		collectVarRefsFromExpr(e.Expression, refs)
+		if e.Test.Name == "defined" || e.Test.Name == "undefined" {
+			// Vars tested for existence are exempt from strict requirements.
+			collectVarExemptFromExpr(e.Expression, exempt)
+		} else {
+			collectVarRefsFromExpr(e.Expression, refs, exempt)
+		}
 		for _, arg := range e.Test.Args {
-			collectVarRefsFromExpr(arg, refs)
+			collectVarRefsFromExpr(arg, refs, exempt)
 		}
 		for _, arg := range e.Test.Kwargs {
-			collectVarRefsFromExpr(arg, refs)
+			collectVarRefsFromExpr(arg, refs, exempt)
 		}
 	}
 }
 
-func collectVarRefsFromNode(n nodes.Node, refs map[string]struct{}) {
+func collectVarRefsFromNode(n nodes.Node, refs, exempt map[string]struct{}) {
 	if expr, ok := n.(nodes.Expression); ok {
-		collectVarRefsFromExpr(expr, refs)
+		collectVarRefsFromExpr(expr, refs, exempt)
+	}
+}
+
+// collectVarExemptFromExpr adds var names from the expression to the exempt set.
+func collectVarExemptFromExpr(expr nodes.Expression, exempt map[string]struct{}) {
+	switch e := expr.(type) {
+	case *nodes.Variable:
+		collectVarRefsFromVariable(e, exempt)
+	case *nodes.GetAttribute:
+		if isVarRoot(e.Node) {
+			exempt[e.Attribute] = struct{}{}
+		}
+	case *nodes.GetItem:
+		if isVarRoot(e.Node) {
+			if s, ok := stringLiteralFromNode(e.Arg); ok {
+				exempt[s] = struct{}{}
+			}
+		}
 	}
 }
 

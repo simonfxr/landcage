@@ -308,6 +308,15 @@ are not declared as handled, so Landlock does not restrict them):
 { "net": "allow" }
 ```
 
+### Denying All Network
+
+Set `"net": "deny"` to explicitly block all network access. This is equivalent to
+omitting the `net` field or setting it to `null`, but is more readable in templates:
+
+```json
+{ "net": "deny" }
+```
+
 ### Rule Object
 
 ```json

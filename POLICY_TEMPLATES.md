@@ -105,8 +105,15 @@ landcage -p agent.json.j2 \
 - Optional variables may be unused without error.
 - Any `var.KEY` mentioned in the template must be provided by either `--var` or
   `--optional-var`; otherwise rendering fails.
+- **Exception:** vars that appear in `is defined` or `is undefined` tests are
+  exempt from this requirement. This allows optional vars with template-level
+  defaults:
+  ```jinja
+  {% if var.net is defined %}{% set net = var.net %}{% else %}{% set net = "deny" %}{% endif %}
+  ```
 - "Mentioned" is based on the parsed template AST, not the execution path. A
-  `var.KEY` inside an untaken `{% if %}` branch still counts as mentioned.
+  `var.KEY` inside an untaken `{% if %}` branch still counts as mentioned
+  (unless guarded by `is defined`).
 - `var` is intentionally separate from `env`; use `env.NAME` to read an
   environment variable in a template.
 

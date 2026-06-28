@@ -68,7 +68,7 @@ See [LANDLOCK_SANDBOX_POLICY.md](LANDLOCK_SANDBOX_POLICY.md) for the full specif
 
 **Additional rule fields:** `refer` (cross-dir rename), `ioctl_dev` (device ioctls), `ignore_missing`, `create_dir`
 
-**Network:** `"connect"`, `"bind"`, or `"connect+bind"` per TCP port; or `"net": "allow"` to skip network restriction entirely
+**Network:** `"connect"`, `"bind"`, or `"connect+bind"` per TCP port; `"net": "allow"` to skip network restriction; or `"net": "deny"` to block all network access
 
 **IPC:** `"deny"` (hard), `"allow"` (explicit), or omit for best-effort deny
 

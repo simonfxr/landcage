@@ -42,6 +42,10 @@ func (nc *NetConfig) UnmarshalJSON(data []byte) error {
 		nc.Allow = true
 		return nil
 	}
+	if string(data) == `"deny"` {
+		// Explicit deny: no network access (same as null/omitted).
+		return nil
+	}
 	return json.Unmarshal(data, &nc.Rules)
 }
 

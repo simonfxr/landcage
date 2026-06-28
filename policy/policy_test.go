@@ -24,6 +24,20 @@ func TestParseNetAllow(t *testing.T) {
 	}
 }
 
+func TestParseNetDeny(t *testing.T) {
+	data := []byte(`{"name": "test", "net": "deny"}`)
+	p, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Net.Allow {
+		t.Error("expected Net.Allow = false")
+	}
+	if len(p.Net.Rules) != 0 {
+		t.Errorf("expected no net rules, got %d", len(p.Net.Rules))
+	}
+}
+
 func TestParseUnshare(t *testing.T) {
 	data := []byte(`{"name": "test", "unshare": {"user": true, "pid": true, "cgroup": true, "mount_proc": true}, "net": "allow"}`)
 	p, err := Parse(data)
@@ -191,6 +205,18 @@ func TestRenderTemplateUnusedRequiredVarFails(t *testing.T) {
 	_, err := RenderTemplate([]byte(`{"name": "static"}`), &opts, true)
 	if err == nil || !strings.Contains(err.Error(), "unused") {
 		t.Fatalf("expected unused required template var error, got %v", err)
+	}
+}
+
+func TestRenderTemplateRequiredVarOnlyInIsDefinedFails(t *testing.T) {
+	// --var foo=val with template that only uses foo in "is defined" guard:
+	// foo is exempt from mentioned, so "unused required" fires.
+	opts := DefaultOptions()
+	opts.TemplateVars = map[string]string{"foo": "val"}
+
+	_, err := RenderTemplate([]byte(`{% if var.foo is defined %}{{ var.foo }}{% endif %}`), &opts, true)
+	if err == nil || !strings.Contains(err.Error(), "unused") {
+		t.Fatalf("expected unused required var error, got %v", err)
 	}
 }
 

@@ -55,6 +55,55 @@ func TestReferencedVarNamesIncludesSetExpression(t *testing.T) {
 	}
 }
 
+func TestReferencedVarNamesExemptsIsDefinedTest(t *testing.T) {
+	tpl, err := Parse(`{% if var.opt is defined %}{{ var.opt }}{% else %}default{% endif %}{{ var.required }}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := tpl.ReferencedVarNames()
+	if _, ok := refs["opt"]; ok {
+		t.Fatalf("var tested with 'is defined' should be exempt: %#v", refs)
+	}
+	if _, ok := refs["required"]; !ok {
+		t.Fatalf("missing required ref in %#v", refs)
+	}
+}
+
+func TestReferencedVarNamesExemptsIsUndefinedTest(t *testing.T) {
+	tpl, err := Parse(`{% if var.missing is undefined %}fallback{% else %}{{ var.missing }}{% endif %}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := tpl.ReferencedVarNames()
+	if _, ok := refs["missing"]; ok {
+		t.Fatalf("var tested with 'is undefined' should be exempt: %#v", refs)
+	}
+}
+
+func TestReferencedVarNamesExemptOverridesUnconditionalUse(t *testing.T) {
+	// If var.foo appears in both an "is defined" test and unconditionally,
+	// the exemption wins. Render will still fail at runtime if not provided.
+	tpl, err := Parse(`{% if var.foo is defined %}guarded{% endif %}{{ var.foo }}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := tpl.ReferencedVarNames()
+	if _, ok := refs["foo"]; ok {
+		t.Fatalf("expected foo to be exempt (current behavior): %#v", refs)
+	}
+}
+
+func TestReferencedVarNamesExemptNegatedDefined(t *testing.T) {
+	tpl, err := Parse(`{% if not (var.foo is defined) %}fallback{% endif %}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := tpl.ReferencedVarNames()
+	if _, ok := refs["foo"]; ok {
+		t.Fatalf("negated is-defined should still exempt: %#v", refs)
+	}
+}
+
 func TestRenderRawBlock(t *testing.T) {
 	tpl, err := Parse(`before {% raw %}{{ var.not_rendered }}{% endraw %} after`)
 	if err != nil {
