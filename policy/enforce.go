@@ -11,9 +11,10 @@ import (
 	llsys "github.com/landlock-lsm/go-landlock/landlock/syscall"
 )
 
-// Enforce applies the policy: expands variables, creates directories,
-// resolves globs, and enforces the Landlock ruleset.
-func Enforce(p *Policy, opts *Options) error {
+// Enforce applies the policy: resolves globs and enforces the Landlock ruleset.
+// All variable expansion must have been performed before calling Enforce (via
+// template rendering at load time).
+func Enforce(p *Policy) error {
 	feat, err := DetectFeatures()
 	if err != nil {
 		return err
@@ -28,10 +29,9 @@ func Enforce(p *Policy, opts *Options) error {
 		return fmt.Errorf("building landlock config: %w", err)
 	}
 
-	exp := NewExpander(opts)
 	var fsRules []ll.Rule
 	for i, r := range p.FS {
-		rules, err := buildFSRules(exp, &r, feat)
+		rules, err := buildFSRules(&r, feat)
 		if err != nil {
 			if r.IgnoreMissing && isPathError(err) {
 				continue
@@ -161,21 +161,13 @@ func resolveScopes(ipc *IPCConfig, feat LandlockFeatures) (ll.ScopedSet, error) 
 	return scoped, nil
 }
 
-func buildFSRules(exp *Expander, r *FSRule, feat LandlockFeatures) ([]ll.Rule, error) {
-	ep, err := exp.Expand(r.Path)
-	if err != nil {
-		if r.IgnoreMissing {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	path := ep.String()
+func buildFSRules(r *FSRule, feat LandlockFeatures) ([]ll.Rule, error) {
+	path := r.Path
 	if path == "" {
 		if r.IgnoreMissing {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("path is empty after variable expansion")
+		return nil, fmt.Errorf("path is empty")
 	}
 
 	if r.CreateDir != "" {
@@ -185,7 +177,7 @@ func buildFSRules(exp *Expander, r *FSRule, feat LandlockFeatures) ([]ll.Rule, e
 		}
 	}
 
-	paths, err := ep.Resolve()
+	paths, err := resolvePath(path)
 	if err != nil {
 		return nil, err
 	}

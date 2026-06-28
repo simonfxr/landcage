@@ -74,7 +74,7 @@ landcage -p agent.json.j2 \
 |------|-------------|
 | `var.NAME` / `var["NAME"]` | CLI template variable from `--var` or `--optional-var` |
 | `env.NAME` / `env["NAME"]` | Original process environment |
-| `home`, `uid`, `user`, `pwd`, `configDir`, `dataDir`, `cacheDir`, `stateDir`, `runtimeDir`, `tmpDir` | Same built-ins as `${...}` expansion |
+| `home`, `uid`, `user`, `pwd`, `configDir`, `dataDir`, `cacheDir`, `stateDir`, `runtimeDir`, `tmpDir` | Same built-ins as top-level template context |
 
 ### Template Variable Rules
 
@@ -97,7 +97,10 @@ The template engine is intentionally small and map-based:
 - `{{ expr }}` interpolation
 - `{% if %}`, `{% elif %}`, `{% else %}`, `{% endif %}`
 - `{% for item in list %}`, optional `{% else %}`, `{% endfor %}`
+- `{% set name = expr %}` local variable assignment
 - `{% raw %}` / `{% endraw %}`
+- `{# comment #}` (ignored)
+- function calls: `{{ fn(arg1, arg2) }}`
 - dotted and indexed access (`var.name`, `env["HOME"]`, `list[0]`)
 - operators such as `and`, `or`, `not`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `in`,
   `+`, `-`, `*`, `/`
@@ -180,7 +183,6 @@ sensitive credentials or adjusting PATH-style variables.
 {
   "env": {
     "FOO": "literal-value",
-    "EXPANDED": "${home}/.config/app",
     "OPENAI_API_KEY": null,
     "EMPTY_VAR": "",
     "PATH": {
@@ -197,7 +199,7 @@ sensitive credentials or adjusting PATH-style variables.
 
 | JSON Value | Effect |
 |------------|--------|
-| `"string"` | Set variable to expanded string value |
+| `"string"` | Set variable to this string value |
 | `null` | Unset (remove from environment) |
 | `""` | Set to empty string (different from unset) |
 | `{...}` | Path-style manipulation (see below) |
@@ -221,27 +223,32 @@ Example with `PATH=/a:/b:/c`:
 ```
 Result: `/x:/a:/c:/y`
 
-### Variable Expansion in Values
+### Template Expansion in Values
 
-Values support `${VAR}` and `${VAR:-default}` syntax. Expansion uses the
-**original** environment (before any `env` changes are applied):
+Since the entire policy file is rendered through the Jinja-style template engine
+before JSON parsing, env values can use template expressions:
 
 ```json
 {
   "env": {
     "FOO": "new",
-    "BAR": "${FOO}"
+    "BAR": "{{ env.FOO or \"default\" }}"
   }
 }
 ```
-Here `BAR` gets the original value of `FOO`, not `"new"`.
+
+Note: template expansion happens once, before JSON parsing. `BAR` gets the
+original value of `FOO` from the process environment, not the `"new"` value
+defined in the same policy.
 
 ### Order of Operations
 
-1. Filesystem path expansion (uses original env)
-2. Landlock enforcement
-3. Environment variable expansion and application
-4. Exec child process
+1. Template rendering (entire policy file)
+2. JSON parsing
+3. Glob resolution + directory creation
+4. Landlock enforcement
+5. Environment variable application
+6. Exec child process
 
 ---
 
@@ -255,7 +262,7 @@ denied** (allowlist model).
 
 ```json
 {
-  "path": "${dataDir}/myapp",
+  "path": "{{ dataDir }}/myapp",
   "access": "rwcd",
   "refer": true,
   "ioctl_dev": true,
@@ -267,7 +274,7 @@ denied** (allowlist model).
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `path` | string | yes | — | Path with variable expansion and optional glob |
+| `path` | string | yes | — | Path (supports template expressions and final-component globs) |
 | `access` | string | yes | — | Access flags: combination of `r`, `w`, `x`, `c`, `d` |
 | `refer` | bool | no | `false` | Allow cross-directory link/rename |
 | `ioctl_dev` | bool | no | `false` | Allow device-driver ioctls |
@@ -315,53 +322,87 @@ permitted regardless of this flag.
 - `ioctl_dev` on a non-device path → **warning** (no effect)
 - `create_dir` and `ignore_missing` on same rule → **error** (mutually exclusive)
 - `create_dir` on a path resolving to a file → **error**
-- Empty path after variable expansion → treated as missing (respects `ignore_missing`, otherwise error)
+- Empty path after template expansion: treated as missing (respects `ignore_missing`, otherwise error)
 
 ---
 
-## Variable Expansion
+## Template Engine
 
-Paths support `${...}` variable references with bash-style defaults.
+All policy files are rendered through a Jinja-style template engine before JSON
+parsing. This replaces the old `${...}` variable expansion syntax.
 
 ### Syntax
 
-| Form | Behavior |
-|------|----------|
-| `${VAR}` | Expand variable; error if unset/empty (unless `ignore_missing`) |
-| `${VAR:-fallback}` | Expand variable; use `fallback` if unset/empty |
-| `${VAR:-}` | Expand variable; use empty string if unset/empty |
+- `{{ expr }}` — interpolation (errors if the expression evaluates to undefined/nil)
+- `{% if %}`, `{% elif %}`, `{% else %}`, `{% endif %}`
+- `{% for item in list %}`, optional `{% else %}`, `{% endfor %}`
+- `{% set name = expr %}` — local variable assignment
+- `{% raw %}` / `{% endraw %}` — output verbatim without processing
+- `{# comment #}` — ignored (not included in output)
+- Function calls: `{{ fn(arg1, arg2) }}`
+- Dotted and indexed access: `env.HOME`, `env["HOME"]`, `list[0]`
+- Operators: `and`, `or`, `not`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `in`, `+`, `-`, `*`, `/`
+- Tests: `is defined`, `is undefined`, `is none`, `is true`, `is false`
 
-Fallbacks can contain nested `${...}` references:
-`${CARGO_HOME:-${dataDir}/cargo}`
+### Built-in Context
 
-### Resolution Order
-
-1. Built-in variables (camelCase, always defined)
-2. Environment variables (typically UPPER_SNAKE_CASE)
-
-Built-ins take precedence over env vars with the same name.
-
-### Built-in Variables
-
-| Variable | Expands to |
-|----------|-----------|
+| Name | Description |
+|------|-------------|
 | `home` | `$HOME` |
-| `uid` | Numeric user ID (from `getuid`) |
-| `user` | Username (from `/etc/passwd`) |
-| `pwd` | Current working directory (from `getcwd`) |
-| `configDir` | `${XDG_CONFIG_HOME:-$HOME/.config}` |
-| `dataDir` | `${XDG_DATA_HOME:-$HOME/.local/share}` |
-| `cacheDir` | `${XDG_CACHE_HOME:-$HOME/.cache}` |
-| `stateDir` | `${XDG_STATE_HOME:-$HOME/.local/state}` |
-| `runtimeDir` | `${XDG_RUNTIME_DIR:-/run/user/$UID}` |
-| `tmpDir` | `${TMPDIR:-/tmp}` |
+| `uid` | Numeric user ID |
+| `user` | Username |
+| `pwd` | Current working directory |
+| `configDir` | `$XDG_CONFIG_HOME` or `~/.config` |
+| `dataDir` | `$XDG_DATA_HOME` or `~/.local/share` |
+| `cacheDir` | `$XDG_CACHE_HOME` or `~/.cache` |
+| `stateDir` | `$XDG_STATE_HOME` or `~/.local/state` |
+| `runtimeDir` | `$XDG_RUNTIME_DIR` or `/run/user/$UID` |
+| `tmpDir` | `$TMPDIR` or `/tmp` |
+| `env.NAME` / `env["NAME"]` | Process environment variable |
+| `var.NAME` / `var["NAME"]` | CLI template variable (`.j2` files only) |
 
-### Glob Metacharacters in Substituted Values
+### Built-in Functions
 
-After variable expansion, any glob metacharacters (`*`, `?`) in the substituted
-value are treated as **literals**. Only metacharacters written directly in the
-policy JSON are interpreted as globs. This prevents environment variable values
-from accidentally triggering glob expansion.
+| Function | Description |
+|----------|-------------|
+| `exists(path)` | Returns true if the path exists |
+| `is_dir(path)` | Returns true if the path exists and is a directory |
+| `is_file(path)` | Returns true if the path exists and is a regular file |
+| `find_upward(start, marker...)` | Walks up from `start` looking for a directory containing any of the marker paths; returns the directory path or nil if not found |
+
+Example:
+
+```jinja
+{% set project_root = find_upward(pwd, ".git", "Cargo.toml") %}
+{% if project_root is defined %}
+  { "path": "{{ project_root }}", "access": "rwcd" }
+{% endif %}
+```
+
+### Strict Output
+
+Any `{{ expr }}` that evaluates to undefined (nil) is a hard error. Use `or` to
+provide a default:
+
+```
+{{ env.CARGO_HOME or (dataDir + "/cargo") }}
+```
+
+This replaces the old `${CARGO_HOME:-${dataDir}/cargo}` syntax.
+
+Conditionals (`{% if %}`) can safely test undefined values without error:
+
+```
+{% if env.OPTIONAL_VAR is defined %}{{ env.OPTIONAL_VAR }}{% endif %}
+```
+
+### Unsupported Constructs
+
+Filters, macros, extends, include, and block inheritance are not supported.
+Attempting to use them fails at parse time.
+
+`{% set %}` is an inline tag (no block/endset form). Its scope is the current
+template level (not limited to the enclosing block).
 
 ---
 
@@ -523,7 +564,7 @@ For full UNIX socket control, combine both mechanisms:
 
 ```json
 {
-  "ipc": { "abstract_unix": true },
+  "ipc": { "abstract_unix": "deny" },
   "fs": [
     { "path": "/run/dbus/system_bus_socket", "access": "u", "comment": "allow D-Bus" }
   ]
@@ -546,12 +587,12 @@ For full UNIX socket control, combine both mechanisms:
     { "path": "/dev/urandom", "access": "r" },
     { "path": "/proc/self", "access": "r", "comment": "process introspection" },
 
-    { "path": "${home}/.rustup", "access": "rx", "comment": "Rust toolchains" },
-    { "path": "${CARGO_HOME:-${dataDir}/cargo}", "access": "rwcd", "comment": "cargo cache and registry" },
-    { "path": "${cacheDir}/cargo", "access": "rwcd", "create_dir": "0700" },
+    { "path": "{{ home }}/.rustup", "access": "rx", "comment": "Rust toolchains" },
+    { "path": "{{ env.CARGO_HOME or (dataDir + \"/cargo\") }}", "access": "rwcd", "comment": "cargo cache and registry" },
+    { "path": "{{ cacheDir }}/cargo", "access": "rwcd", "create_dir": "0700" },
 
-    { "path": "${PWD}", "access": "rwcd", "refer": true, "comment": "project working directory" },
-    { "path": "${tmpDir}", "access": "rwcd", "comment": "temporary files" },
+    { "path": "{{ pwd }}", "access": "rwcd", "refer": true, "comment": "project working directory" },
+    { "path": "{{ tmpDir }}", "access": "rwcd", "comment": "temporary files" },
 
     { "path": "/run/dbus/system_bus_socket", "access": "u", "comment": "D-Bus access" }
   ],

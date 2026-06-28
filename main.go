@@ -77,8 +77,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, "landcage: LANDCAGE_POLICY_JSON environment variable is not set")
 			os.Exit(1)
 		}
-		var err error
-		pol, err = policy.Parse([]byte(raw))
+		opts := policy.DefaultOptions()
+		rendered, renderErr := policy.RenderTemplate([]byte(raw), &opts, false)
+		if renderErr != nil {
+			fmt.Fprintf(os.Stderr, "landcage: %v\n", renderErr)
+			os.Exit(1)
+		}
+		pol, err = policy.Parse(rendered)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 			os.Exit(1)
@@ -149,17 +154,15 @@ func main() {
 		})
 	}
 
-	// Create options from process environment.
+	// Create the target environment.
 	// Clear LANDCAGE_POLICY_JSON now — after any forkChild so the child got it,
-	// but before DefaultOptions captures the env, so the target never sees it.
+	// but before capturing the env, so the target never sees it.
 	if a.PolicyJSON {
 		os.Unsetenv("LANDCAGE_POLICY_JSON")
 	}
 
-	opts := policy.DefaultOptions()
-
 	if a.DryRun {
-		if err := policy.DryRun(pol, &opts, os.Stdout); err != nil {
+		if err := policy.DryRun(pol, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 			os.Exit(1)
 		}
@@ -167,13 +170,13 @@ func main() {
 	}
 
 	// Enforce sandbox
-	if err := policy.Enforce(pol, &opts); err != nil {
+	if err := policy.Enforce(pol); err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Apply environment changes (after Enforce so fs expansion uses original env)
-	env, err := policy.ApplyEnv(pol, &opts)
+	// Apply environment changes
+	env, err := policy.ApplyEnv(pol, policy.ProcessEnv())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 		os.Exit(1)

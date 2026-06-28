@@ -123,6 +123,8 @@ func collectVarRefsFromControl(cs nodes.ControlStructure, refs map[string]struct
 		if n.elseWrapper != nil {
 			collectVarRefsFromNodes(n.elseWrapper.Nodes, refs)
 		}
+	case *setNode:
+		collectVarRefsFromExpr(n.expr, refs)
 	}
 }
 
@@ -244,7 +246,7 @@ func renderNode(w io.Writer, node nodes.Node, ctx map[string]any, funcs map[stri
 			return err
 		}
 		if val == nil {
-			return nil
+			return fmt.Errorf("undefined value in template expression")
 		}
 		_, err = fmt.Fprint(w, val)
 		return err
@@ -278,6 +280,13 @@ func renderControlStructure(w io.Writer, block *nodes.ControlStructureBlock, ctx
 	case *rawNode:
 		_, err := io.WriteString(w, cs.data)
 		return err
+	case *setNode:
+		val, err := eval(cs.expr, ctx, funcs)
+		if err != nil {
+			return err
+		}
+		ctx[cs.name] = val
+		return nil
 	default:
 		return fmt.Errorf("unsupported control structure: %T", cs)
 	}

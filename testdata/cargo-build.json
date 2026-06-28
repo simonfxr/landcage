@@ -10,12 +10,12 @@
     { "path": "/dev/urandom", "access": "r" },
     { "path": "/proc/self", "access": "r", "comment": "process introspection" },
 
-    { "path": "${home}/.rustup", "access": "rx", "comment": "Rust toolchains" },
-    { "path": "${CARGO_HOME:-${dataDir}/cargo}", "access": "rwcd", "comment": "cargo cache and registry" },
-    { "path": "${cacheDir}/cargo", "access": "rwcd", "create_dir": "0700" },
+    { "path": "{{ home }}/.rustup", "access": "rx", "comment": "Rust toolchains" },
+    { "path": "{{ env.CARGO_HOME or (dataDir + '/cargo') }}", "access": "rwcd", "comment": "cargo cache and registry" },
+    { "path": "{{ cacheDir }}/cargo", "access": "rwcd", "create_dir": "0700" },
 
-    { "path": "${PWD}", "access": "rwcd", "refer": true, "comment": "project working directory" },
-    { "path": "${tmpDir}", "access": "rwcd", "comment": "temporary files" }
+    { "path": "{{ pwd }}", "access": "rwcd", "refer": true, "comment": "project working directory" },
+    { "path": "{{ tmpDir }}", "access": "rwcd", "comment": "temporary files" }
   ],
   "net": [
     { "port": 443, "access": "connect", "comment": "HTTPS (crates.io)" },

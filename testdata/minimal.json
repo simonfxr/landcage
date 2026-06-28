@@ -7,6 +7,6 @@
     { "path": "/etc", "access": "r" },
     { "path": "/dev/null", "access": "rw" },
     { "path": "/proc/self", "access": "r" },
-    { "path": "${tmpDir}", "access": "rwcd" }
+    { "path": "{{ tmpDir }}", "access": "rwcd" }
   ]
 }

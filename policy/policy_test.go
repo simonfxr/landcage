@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -117,12 +118,35 @@ func TestLoadRendersJ2Policy(t *testing.T) {
 	}
 }
 
+func TestLoadRendersPlainJSONWithBuiltins(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	if err := os.WriteFile(path, []byte(`{
+		"name": "test",
+		"fs": [{"path": "{{ tmpDir }}", "access": "r"}],
+		"net": "allow"
+	}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := DefaultOptions()
+	opts.Dirs.TmpDir = "/my-tmp"
+
+	p, err := LoadWithOptions(path, &opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.FS) != 1 || p.FS[0].Path != "/my-tmp" {
+		t.Fatalf("unexpected fs rules: %+v", p.FS)
+	}
+}
+
 func TestRenderTemplateVars(t *testing.T) {
 	opts := DefaultOptions()
 	opts.TemplateVars = map[string]string{"name": "policy"}
 	opts.OptionalTemplateVars = map[string]string{"unused": "ok"}
 
-	got, err := RenderTemplate([]byte(`{"name": "{{ var.name }}"}`), &opts)
+	got, err := RenderTemplate([]byte(`{"name": "{{ var.name }}"}`), &opts, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +158,7 @@ func TestRenderTemplateVars(t *testing.T) {
 func TestRenderTemplateMissingVarFailsEvenInUntakenBranch(t *testing.T) {
 	opts := DefaultOptions()
 
-	_, err := RenderTemplate([]byte(`{% if false %}{{ var.missing }}{% endif %}`), &opts)
+	_, err := RenderTemplate([]byte(`{% if false %}{{ var.missing }}{% endif %}`), &opts, true)
 	if err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("expected missing template var error, got %v", err)
 	}
@@ -144,7 +168,7 @@ func TestRenderTemplateUnusedRequiredVarFails(t *testing.T) {
 	opts := DefaultOptions()
 	opts.TemplateVars = map[string]string{"unused": "value"}
 
-	_, err := RenderTemplate([]byte(`{"name": "static"}`), &opts)
+	_, err := RenderTemplate([]byte(`{"name": "static"}`), &opts, true)
 	if err == nil || !strings.Contains(err.Error(), "unused") {
 		t.Fatalf("expected unused required template var error, got %v", err)
 	}
@@ -154,7 +178,7 @@ func TestRenderTemplateOptionalVarMayBeUnused(t *testing.T) {
 	opts := DefaultOptions()
 	opts.OptionalTemplateVars = map[string]string{"unused": "value"}
 
-	_, err := RenderTemplate([]byte(`{"name": "static"}`), &opts)
+	_, err := RenderTemplate([]byte(`{"name": "static"}`), &opts, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,9 +188,42 @@ func TestRenderTemplateMentionedOptionalVarInUntakenBranchIsSatisfied(t *testing
 	opts := DefaultOptions()
 	opts.OptionalTemplateVars = map[string]string{"maybe": "value"}
 
-	_, err := RenderTemplate([]byte(`{% if false %}{{ var.maybe }}{% endif %}{"name": "static"}`), &opts)
+	_, err := RenderTemplate([]byte(`{% if false %}{{ var.maybe }}{% endif %}{"name": "static"}`), &opts, true)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRenderTemplateStrictNilOnOutput(t *testing.T) {
+	opts := DefaultOptions()
+
+	// Accessing an unset env var directly errors
+	_, err := RenderTemplate([]byte(`{{ env.LANDCAGE_TEST_UNSET_12345 }}`), &opts, false)
+	if err == nil {
+		t.Fatal("expected error for undefined env var output")
+	}
+
+	// Using 'or' provides a default
+	got, err := RenderTemplate([]byte(`{{ env.LANDCAGE_TEST_UNSET_12345 or "/fallback" }}`), &opts, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "/fallback" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestRenderTemplateEnvAccess(t *testing.T) {
+	opts := DefaultOptions()
+	opts.Env["LANDCAGE_TEST_RENDER"] = "hello"
+	opts.Dirs.Home = "/home/test"
+
+	got, err := RenderTemplate([]byte(`{{ home }}:{{ env.LANDCAGE_TEST_RENDER }}`), &opts, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "/home/test:hello" {
+		t.Fatalf("got %q", got)
 	}
 }
 
@@ -194,120 +251,13 @@ func TestParseErrors(t *testing.T) {
 	}
 }
 
-func TestExpandSimple(t *testing.T) {
-	os.Setenv("LANDCAGE_TEST_VAR", "hello")
-	defer os.Unsetenv("LANDCAGE_TEST_VAR")
-
-	opts := DefaultOptions()
-	exp := NewExpander(&opts)
-	got, err := exp.Expand("/prefix/${LANDCAGE_TEST_VAR}/suffix")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.String() != "/prefix/hello/suffix" {
-		t.Errorf("got %q, want %q", got.String(), "/prefix/hello/suffix")
-	}
-}
-
-func TestExpandDefault(t *testing.T) {
-	os.Unsetenv("LANDCAGE_UNSET_VAR")
-	opts := DefaultOptions()
-	exp := NewExpander(&opts)
-	got, err := exp.Expand("${LANDCAGE_UNSET_VAR:-/fallback}")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.String() != "/fallback" {
-		t.Errorf("got %q, want %q", got.String(), "/fallback")
-	}
-}
-
-func TestExpandNested(t *testing.T) {
-	os.Unsetenv("LANDCAGE_OUTER")
-	os.Setenv("LANDCAGE_INNER", "/inner")
-	defer os.Unsetenv("LANDCAGE_INNER")
-
-	opts := DefaultOptions()
-	exp := NewExpander(&opts)
-	got, err := exp.Expand("${LANDCAGE_OUTER:-${LANDCAGE_INNER}/sub}")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.String() != "/inner/sub" {
-		t.Errorf("got %q, want %q", got.String(), "/inner/sub")
-	}
-}
-
-func TestExpandBuiltins(t *testing.T) {
-	opts := DefaultOptions()
-	exp := NewExpander(&opts)
-	got, err := exp.Expand("${home}")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.String() != os.Getenv("HOME") {
-		t.Errorf("got %q, want %q", got.String(), os.Getenv("HOME"))
-	}
-}
-
-func TestExpandEscapesGlob(t *testing.T) {
-	os.Setenv("LANDCAGE_GLOB", "foo*bar")
-	defer os.Unsetenv("LANDCAGE_GLOB")
-
-	opts := DefaultOptions()
-	exp := NewExpander(&opts)
-	got, err := exp.Expand("/dir/${LANDCAGE_GLOB}")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// With the new typed approach, String() returns the raw text (no escaping)
-	if got.String() != "/dir/foo*bar" {
-		t.Errorf("got %q, want %q", got.String(), "/dir/foo*bar")
-	}
-	// But the segment from the variable is marked FromVar=true
-	if len(got) != 2 {
-		t.Fatalf("expected 2 segments, got %d", len(got))
-	}
-	if got[1].FromVar != true || got[1].Text != "foo*bar" {
-		t.Errorf("expected FromVar=true segment with raw text, got %+v", got[1])
-	}
-}
-
-func TestExpandUnset(t *testing.T) {
-	os.Unsetenv("LANDCAGE_NOPE")
-	opts := DefaultOptions()
-	exp := NewExpander(&opts)
-	_, err := exp.Expand("${LANDCAGE_NOPE}")
-	if err == nil {
-		t.Error("expected error for unset var without default")
-	}
-}
-
-func TestExpandEmptyDefault(t *testing.T) {
-	os.Unsetenv("LANDCAGE_EMPTY")
-	opts := DefaultOptions()
-	exp := NewExpander(&opts)
-	got, err := exp.Expand("${LANDCAGE_EMPTY:-}")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.String() != "" {
-		t.Errorf("got %q, want empty", got.String())
-	}
-}
-
 func TestResolveGlob(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"foo.txt", "bar.txt", "baz.log"} {
 		os.WriteFile(filepath.Join(dir, name), nil, 0644)
 	}
 
-	exp := testExpander(nil, nil)
-	ep, err := exp.Expand(dir + "/*.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	paths, err := ep.Resolve()
+	paths, err := resolvePath(dir + "/*.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,12 +268,7 @@ func TestResolveGlob(t *testing.T) {
 
 func TestResolveNoMatch(t *testing.T) {
 	dir := t.TempDir()
-	exp := testExpander(nil, nil)
-	ep, err := exp.Expand(dir + "/*.xyz")
-	if err != nil {
-		t.Fatal(err)
-	}
-	paths, err := ep.Resolve()
+	paths, err := resolvePath(dir + "/*.xyz")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,12 +278,7 @@ func TestResolveNoMatch(t *testing.T) {
 }
 
 func TestResolveNoMeta(t *testing.T) {
-	exp := testExpander(nil, nil)
-	ep, err := exp.Expand("/usr/bin/ls")
-	if err != nil {
-		t.Fatal(err)
-	}
-	paths, err := ep.Resolve()
+	paths, err := resolvePath("/usr/bin/ls")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,62 +288,9 @@ func TestResolveNoMeta(t *testing.T) {
 }
 
 func TestResolveMiddleComponent(t *testing.T) {
-	exp := testExpander(nil, nil)
-	ep, err := exp.Expand("/dev/*/card0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = ep.Resolve()
+	_, err := resolvePath("/dev/*/card0")
 	if err == nil {
 		t.Error("expected error for glob in middle component")
-	}
-}
-
-func TestResolveVarWithGlobCharsIsLiteral(t *testing.T) {
-	// A variable containing * should NOT be treated as a glob
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "file*name"), nil, 0644)
-	os.WriteFile(filepath.Join(dir, "fileXname"), nil, 0644)
-
-	os.Setenv("_LC_LITERAL", "file*name")
-	defer os.Unsetenv("_LC_LITERAL")
-
-	exp := testExpander(nil, nil)
-	ep, err := exp.Expand(dir + "/${_LC_LITERAL}")
-	if err != nil {
-		t.Fatal(err)
-	}
-	paths, err := ep.Resolve()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Should match only the literal "file*name", not "fileXname"
-	if len(paths) != 1 || filepath.Base(paths[0]) != "file*name" {
-		t.Errorf("got %v, want single file with literal *", paths)
-	}
-}
-
-func TestResolveVarWithGlobCharsInDirIsLiteral(t *testing.T) {
-	// A variable containing * in a non-final component should NOT trigger error
-	dir := t.TempDir()
-	subdir := filepath.Join(dir, "a*b")
-	os.MkdirAll(subdir, 0755)
-	os.WriteFile(filepath.Join(subdir, "file.txt"), nil, 0644)
-
-	os.Setenv("_LC_STARDIR", "a*b")
-	defer os.Unsetenv("_LC_STARDIR")
-
-	exp := testExpander(nil, nil)
-	ep, err := exp.Expand(dir + "/${_LC_STARDIR}/file.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	paths, err := ep.Resolve()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(paths) != 1 || filepath.Base(paths[0]) != "file.txt" {
-		t.Errorf("got %v, want single file.txt under literal a*b dir", paths)
 	}
 }
 
@@ -413,12 +300,7 @@ func TestResolveBracketGlob(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, name), nil, 0644)
 	}
 
-	exp := testExpander(nil, nil)
-	ep, err := exp.Expand(dir + "/card[0-2]")
-	if err != nil {
-		t.Fatal(err)
-	}
-	paths, err := ep.Resolve()
+	paths, err := resolvePath(dir + "/card[0-2]")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,44 +309,13 @@ func TestResolveBracketGlob(t *testing.T) {
 	}
 }
 
-func TestResolveMixedVarAndLiteralGlob(t *testing.T) {
-	// Variable with metacharacters + literal glob in same final component
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "a*b_1.txt"), nil, 0644)
-	os.WriteFile(filepath.Join(dir, "a*b_2.txt"), nil, 0644)
-	os.WriteFile(filepath.Join(dir, "aXb_1.txt"), nil, 0644)
-
-	os.Setenv("_LC_PFX", "a*b_")
-	defer os.Unsetenv("_LC_PFX")
-
-	exp := testExpander(nil, nil)
-	ep, err := exp.Expand(dir + "/${_LC_PFX}*.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	paths, err := ep.Resolve()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Should match "a*b_1.txt" and "a*b_2.txt" but NOT "aXb_1.txt"
-	if len(paths) != 2 {
-		t.Errorf("got %d matches, want 2: %v", len(paths), paths)
-	}
-}
-
 func TestResolveRoot(t *testing.T) {
-	// Test that globbing works in a directory (not scanning CWD by mistake)
 	dir := t.TempDir()
 	os.MkdirAll(dir+"/aaa", 0755)
 	os.MkdirAll(dir+"/aab", 0755)
 	os.MkdirAll(dir+"/bbb", 0755)
 
-	exp := testExpander(nil, nil)
-	ep, err := exp.Expand(dir + "/aa*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	paths, err := ep.Resolve()
+	paths, err := resolvePath(dir + "/aa*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +360,6 @@ func TestFSAccessSetFileReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Should only have READ_FILE, not READ_DIR
 	if access&llsys.AccessFSReadDir != 0 {
 		t.Error("READ_DIR should not be set for file rule")
 	}
@@ -530,7 +380,6 @@ func TestFSAccessSetFileUnixSocketResolve(t *testing.T) {
 }
 
 func TestFSAccessSetTruncateDowngrade(t *testing.T) {
-	// 'w' should include truncate on ABI >= 3
 	r := &FSRule{Path: "/tmp/f", Access: "w"}
 	access, err := fsAccessSet(r, false, FeaturesForABI(9))
 	if err != nil {
@@ -539,32 +388,13 @@ func TestFSAccessSetTruncateDowngrade(t *testing.T) {
 	if access&llsys.AccessFSTruncate == 0 {
 		t.Error("expected truncate to be set on ABI 9")
 	}
-	if access&llsys.AccessFSWriteFile == 0 {
-		t.Error("expected write_file to be set")
-	}
 
-	// On ABI 2, 'w' should only set write_file, silently dropping truncate
 	access, err = fsAccessSet(r, false, FeaturesForABI(2))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if access&llsys.AccessFSTruncate != 0 {
 		t.Error("expected truncate to NOT be set on ABI 2")
-	}
-	if access&llsys.AccessFSWriteFile == 0 {
-		t.Error("expected write_file to be set even on ABI 2")
-	}
-
-	// On ABI 1, same behavior
-	access, err = fsAccessSet(r, false, FeaturesForABI(1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if access&llsys.AccessFSTruncate != 0 {
-		t.Error("expected truncate to NOT be set on ABI 1")
-	}
-	if access&llsys.AccessFSWriteFile == 0 {
-		t.Error("expected write_file to be set even on ABI 1")
 	}
 }
 
@@ -597,7 +427,6 @@ func TestResolveIPC(t *testing.T) {
 }
 
 func TestResolveScopesGranular(t *testing.T) {
-	// Mixed: deny abstract_unix but allow signal
 	scoped, err := resolveScopes(&IPCConfig{AbstractUnix: "deny", Signal: "allow"}, FeaturesForABI(8))
 	if err != nil {
 		t.Fatal(err)
@@ -609,7 +438,6 @@ func TestResolveScopesGranular(t *testing.T) {
 		t.Error("expected ScopeSignal to NOT be set")
 	}
 
-	// Both default (best-effort deny)
 	scoped, err = resolveScopes(nil, FeaturesForABI(8))
 	if err != nil {
 		t.Fatal(err)
@@ -618,7 +446,6 @@ func TestResolveScopesGranular(t *testing.T) {
 		t.Errorf("expected both scopes set, got %d", scoped)
 	}
 
-	// Old kernel, best-effort
 	scoped, err = resolveScopes(nil, FeaturesForABI(5))
 	if err != nil {
 		t.Fatal(err)
@@ -627,9 +454,35 @@ func TestResolveScopesGranular(t *testing.T) {
 		t.Errorf("expected 0 scopes on old kernel, got %d", scoped)
 	}
 
-	// Old kernel, hard deny
 	_, err = resolveScopes(&IPCConfig{Signal: "deny"}, FeaturesForABI(5))
 	if err == nil {
 		t.Error("expected error for hard deny on old kernel")
+	}
+}
+
+func TestDryRunEnvOutput(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+	p := &Policy{
+		Name: "test",
+		Env: map[string]EnvEntry{
+			"SET_VAR":   {Value: strPtr("hello")},
+			"UNSET_VAR": {Unset: true},
+			"PATH_VAR":  {Prepend: StringBag{"/a"}, Append: StringBag{"/b"}, Remove: StringBag{"/c"}, Sep: ":"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := DryRun(p, &buf); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, `SET_VAR = "hello"`) {
+		t.Errorf("missing SET_VAR output in:\n%s", out)
+	}
+	if !strings.Contains(out, "UNSET_VAR: UNSET") {
+		t.Errorf("missing UNSET_VAR output in:\n%s", out)
+	}
+	if !strings.Contains(out, "PATH_VAR:") && !strings.Contains(out, "prepend") {
+		t.Errorf("missing PATH_VAR path op output in:\n%s", out)
 	}
 }

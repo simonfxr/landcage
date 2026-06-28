@@ -17,6 +17,8 @@ func (cs *controlStructures) Get(name string) (parser.ControlStructureParser, bo
 		return parseIf, true
 	case "for":
 		return parseFor, true
+	case "set":
+		return parseSet, true
 	case "raw":
 		return parseRaw, true
 	default:
@@ -175,6 +177,41 @@ func parseRaw(p *parser.Parser, args *parser.Parser) (nodes.ControlStructure, er
 			return nil, p.Error("raw block must contain only text", node.Position())
 		}
 		n.data += data.Data.Val
+	}
+	return n, nil
+}
+
+// setNode represents a {% set name = expr %} assignment.
+type setNode struct {
+	location *tokens.Token
+	name     string
+	expr     nodes.Expression
+}
+
+func (n *setNode) Position() *tokens.Token { return n.location }
+func (n *setNode) String() string          { return "set" }
+
+func parseSet(p *parser.Parser, args *parser.Parser) (nodes.ControlStructure, error) {
+	n := &setNode{location: args.Current()}
+
+	nameToken := args.Match(tokens.Name)
+	if nameToken == nil {
+		return nil, args.Error("expected variable name after 'set'", nil)
+	}
+	n.name = nameToken.Val
+
+	if args.Match(tokens.Assign) == nil {
+		return nil, args.Error("expected '=' after variable name", nil)
+	}
+
+	expr, err := args.ParseExpression()
+	if err != nil {
+		return nil, err
+	}
+	n.expr = expr
+
+	if !args.End() {
+		return nil, args.Error("unexpected tokens after set expression", nil)
 	}
 	return n, nil
 }

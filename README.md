@@ -14,6 +14,8 @@ go install github.com/simonfxr/landcage@latest
 landcage -p policy.json -- <command> [args...]
 landcage --dry-run -p policy.json --
 landcage -p policy.json.j2 --var name=value --optional-var flag=1 -- <command> [args...]
+landcage --policy-json-from-env -- <command> [args...]
+landcage --rw /project --ro /usr -- <command> [args...]
 ```
 
 ## Example
@@ -28,8 +30,8 @@ landcage -p policy.json.j2 --var name=value --optional-var flag=1 -- <command> [
     { "path": "/etc/ssl", "access": "r" },
     { "path": "/etc/resolv.conf", "access": "r" },
     { "path": "/dev/null", "access": "rw" },
-    { "path": "${tmpDir}", "access": "rwcd" },
-    { "path": "${PWD}", "access": "rw" }
+    { "path": "{{ tmpDir }}", "access": "rwcd" },
+    { "path": "{{ pwd }}", "access": "rw" }
   ],
   "net": [
     { "port": 443, "access": "connect" },
@@ -39,10 +41,10 @@ landcage -p policy.json.j2 --var name=value --optional-var flag=1 -- <command> [
 ```
 
 ```
-$ landcage policy.json -- curl -o /tmp/out https://example.com
+$ landcage -p policy.json -- curl -o /tmp/out https://example.com
 # works
 
-$ landcage policy.json -- curl -o /home/user/out https://example.com
+$ landcage -p policy.json -- curl -o /home/user/out https://example.com
 # curl: Permission denied
 ```
 
@@ -69,10 +71,41 @@ See [LANDLOCK_SANDBOX_POLICY.md](LANDLOCK_SANDBOX_POLICY.md) for the full specif
 
 **IPC:** `"deny"` (hard), `"allow"` (explicit), or omit for best-effort deny
 
-**Variables:** `${home}`, `${uid}`, `${user}`, `${pwd}`, `${configDir}`, `${dataDir}`, `${cacheDir}`, `${stateDir}`, `${runtimeDir}`, `${tmpDir}`, `${ENV_VAR}`, `${VAR:-default}`
+**Template variables:** All policy files are rendered through a Jinja-style
+template engine before JSON parsing. Built-in variables are available at the
+top level:
 
-**Jinja templates:** policy files ending in `.j2` are rendered before JSON
-parsing. Template variables passed on the CLI live under the `var` namespace:
+| Variable | Value |
+|----------|-------|
+| `home` | `$HOME` |
+| `uid` | Numeric user ID |
+| `user` | Username |
+| `pwd` | Current working directory |
+| `configDir` | `$XDG_CONFIG_HOME` or `~/.config` |
+| `dataDir` | `$XDG_DATA_HOME` or `~/.local/share` |
+| `cacheDir` | `$XDG_CACHE_HOME` or `~/.cache` |
+| `stateDir` | `$XDG_STATE_HOME` or `~/.local/state` |
+| `runtimeDir` | `$XDG_RUNTIME_DIR` or `/run/user/$UID` |
+| `tmpDir` | `$TMPDIR` or `/tmp` |
+
+Environment variables are available as `{{ env.NAME }}` or `{{ env["NAME"] }}`.
+Accessing an undefined variable in output (`{{ }}`) is an error; use `or` to
+provide a default: `{{ env.CARGO_HOME or (dataDir + "/cargo") }}`.
+
+**Built-in template functions:**
+
+| Function | Description |
+|----------|-------------|
+| `exists(path)` | Returns true if the path exists |
+| `is_dir(path)` | Returns true if the path exists and is a directory |
+| `is_file(path)` | Returns true if the path exists and is a regular file |
+| `find_upward(start, marker...)` | Walks up from `start` looking for a directory containing any marker; returns the directory path or nil |
+
+**Additional template syntax:** `{% set name = expr %}` (local variable
+assignment), `{# comment #}` (ignored), and `{{ fn(arg) }}` (function calls).
+
+**Parameterized templates (`.j2`):** Files ending in `.j2` additionally support
+CLI-provided template variables under the `var` namespace:
 
 ```jinja
 {
@@ -99,6 +132,14 @@ landcage -p agent.json.j2 \
 mentioned `var.KEY` that was not provided fails template rendering, including
 mentions in untaken branches.
 
+**Inline policy from environment:** `--policy-json-from-env` reads policy JSON
+from the `LANDCAGE_POLICY_JSON` environment variable (which is cleared before
+exec'ing the child). Mutually exclusive with `-p`.
+
+**Quick path flags:** `--ro PATH` adds a read+execute rule (like `"access": "rx"`).
+`--rw PATH` adds a full read/write/execute/create/delete+refer rule. Both
+set `ignore_missing: true`. These can be combined with `-p` or used standalone.
+
 ## Requirements
 
 - Linux kernel 5.13+ (Landlock V1) — more features with newer kernels
@@ -106,9 +147,9 @@ mentions in untaken branches.
 
 ## How It Works
 
-1. Parses the policy JSON
-2. Expands variables and globs
-3. Creates directories (`create_dir`)
+1. Renders the policy file through the Jinja template engine
+2. Parses the resulting JSON
+3. Resolves globs and creates directories (`create_dir`)
 4. Builds a Landlock ruleset with all supported access rights handled
 5. Enforces via `landlock_restrict_self()` (sets `no_new_privs`)
 6. `exec()`s the child process inside the sandbox

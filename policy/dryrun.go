@@ -8,8 +8,9 @@ import (
 )
 
 // DryRun resolves all rules and prints what would be enforced, without
-// actually applying the Landlock ruleset.
-func DryRun(p *Policy, opts *Options, w io.Writer) error {
+// actually applying the Landlock ruleset. All variable expansion must have
+// been performed before calling DryRun (via template rendering at load time).
+func DryRun(p *Policy, w io.Writer) error {
 	feat, featErr := DetectFeatures()
 	if featErr != nil {
 		feat = LandlockFeatures{ABI: 0}
@@ -21,34 +22,22 @@ func DryRun(p *Policy, opts *Options, w io.Writer) error {
 	}
 	fmt.Fprintf(w, "Kernel features: %s\n\n", feat.String())
 
-	exp := NewExpander(opts)
-
 	// Filesystem rules
 	if len(p.FS) > 0 {
 		fmt.Fprintf(w, "Filesystem rules:\n")
 		for i, r := range p.FS {
-			ep, err := exp.Expand(r.Path)
-			if err != nil {
+			if r.Path == "" {
 				if r.IgnoreMissing {
-					fmt.Fprintf(w, "  [%d] SKIP (expand error): %s\n", i, r.Path)
+					fmt.Fprintf(w, "  [%d] SKIP (empty path)\n", i)
 					continue
 				}
-				return fmt.Errorf("fs rule %d: %w", i, err)
+				return fmt.Errorf("fs rule %d: path is empty", i)
 			}
 
-			pathStr := ep.String()
-			if pathStr == "" {
-				if r.IgnoreMissing {
-					fmt.Fprintf(w, "  [%d] SKIP (empty path): %s\n", i, r.Path)
-					continue
-				}
-				return fmt.Errorf("fs rule %d: path is empty after expansion", i)
-			}
-
-			paths, err := ep.Resolve()
+			paths, err := resolvePath(r.Path)
 			if err != nil {
 				if r.IgnoreMissing {
-					fmt.Fprintf(w, "  [%d] SKIP (resolve error): %s → %s\n", i, r.Path, pathStr)
+					fmt.Fprintf(w, "  [%d] SKIP (resolve error): %s\n", i, r.Path)
 					continue
 				}
 				return fmt.Errorf("fs rule %d: %w", i, err)
@@ -56,10 +45,10 @@ func DryRun(p *Policy, opts *Options, w io.Writer) error {
 
 			if len(paths) == 0 {
 				if r.IgnoreMissing {
-					fmt.Fprintf(w, "  [%d] SKIP (no matches): %s → %s\n", i, r.Path, pathStr)
+					fmt.Fprintf(w, "  [%d] SKIP (no matches): %s\n", i, r.Path)
 					continue
 				}
-				return fmt.Errorf("fs rule %d: no matches for %s", i, pathStr)
+				return fmt.Errorf("fs rule %d: no matches for %s", i, r.Path)
 			}
 
 			// Compute warning once per rule, not per resolved path.
@@ -91,7 +80,6 @@ func DryRun(p *Policy, opts *Options, w io.Writer) error {
 					flags += " +ioctl_dev"
 				}
 
-				// Show downgrade notes for flags silently omitted due to kernel ABI.
 				note := ""
 				if strings.ContainsRune(r.Access, 'w') && !feat.SupportsTruncate() {
 					note = fmt.Sprintf(" [note: truncate unavailable on ABI %d]", feat.ABI)
@@ -154,25 +142,17 @@ func DryRun(p *Policy, opts *Options, w io.Writer) error {
 			if entry.Unset {
 				fmt.Fprintf(w, "  %s: UNSET\n", name)
 			} else if entry.Value != nil {
-				expanded, err := exp.Expand(*entry.Value)
-				if err != nil {
-					return fmt.Errorf("env %s: %w", name, err)
-				}
-				fmt.Fprintf(w, "  %s = %q\n", name, expanded.String())
+				fmt.Fprintf(w, "  %s = %q\n", name, *entry.Value)
 			} else {
-				// Path operation
 				var ops []string
 				for _, p := range entry.Prepend {
-					expanded, _ := exp.Expand(p)
-					ops = append(ops, fmt.Sprintf("prepend %q", expanded.String()))
+					ops = append(ops, fmt.Sprintf("prepend %q", p))
 				}
 				for _, r := range entry.Remove {
-					expanded, _ := exp.Expand(r)
-					ops = append(ops, fmt.Sprintf("remove %q", expanded.String()))
+					ops = append(ops, fmt.Sprintf("remove %q", r))
 				}
 				for _, a := range entry.Append {
-					expanded, _ := exp.Expand(a)
-					ops = append(ops, fmt.Sprintf("append %q", expanded.String()))
+					ops = append(ops, fmt.Sprintf("append %q", a))
 				}
 				fmt.Fprintf(w, "  %s: %s (sep=%q)\n", name, strings.Join(ops, ", "), entry.Sep)
 			}

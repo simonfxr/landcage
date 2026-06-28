@@ -2,6 +2,8 @@ package policy
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -12,7 +14,11 @@ import (
 // process-derived context. The context exposes directory/user built-ins at the
 // top level (home, pwd, configDir, dataDir, cacheDir, stateDir, runtimeDir,
 // tmpDir, uid, user) and the original environment as env.NAME / env["NAME"].
-func RenderTemplate(data []byte, opts *Options) ([]byte, error) {
+//
+// When checkVars is true (for .j2 files), the var namespace is populated from
+// opts.TemplateVars/OptionalTemplateVars and strict checking applies: all
+// mentioned var.KEY must be provided, and all required vars must be mentioned.
+func RenderTemplate(data []byte, opts *Options, checkVars bool) ([]byte, error) {
 	if opts == nil {
 		defaultOpts := DefaultOptions()
 		opts = &defaultOpts
@@ -23,16 +29,24 @@ func RenderTemplate(data []byte, opts *Options) ([]byte, error) {
 		return nil, err
 	}
 
-	mentioned := tpl.ReferencedVarNames()
+	// Register built-in filesystem functions
+	tpl.WithFunc("exists", builtinExists)
+	tpl.WithFunc("is_dir", builtinIsDir)
+	tpl.WithFunc("is_file", builtinIsFile)
+	tpl.WithFunc("find_upward", builtinFindUpward)
+
 	templateVars := make(map[string]any, len(opts.TemplateVars)+len(opts.OptionalTemplateVars))
-	for k, v := range opts.OptionalTemplateVars {
-		templateVars[k] = v
-	}
-	for k, v := range opts.TemplateVars {
-		templateVars[k] = v
-	}
-	if err := checkTemplateVars(mentioned, opts.TemplateVars, templateVars); err != nil {
-		return nil, err
+	if checkVars {
+		for k, v := range opts.OptionalTemplateVars {
+			templateVars[k] = v
+		}
+		for k, v := range opts.TemplateVars {
+			templateVars[k] = v
+		}
+		mentioned := tpl.ReferencedVarNames()
+		if err := checkTemplateVarConstraints(mentioned, opts.TemplateVars, templateVars); err != nil {
+			return nil, err
+		}
 	}
 
 	env := make(map[string]any, len(opts.Env))
@@ -62,7 +76,7 @@ func RenderTemplate(data []byte, opts *Options) ([]byte, error) {
 	return []byte(out.String()), nil
 }
 
-func checkTemplateVars(mentioned map[string]struct{}, required map[string]string, provided map[string]any) error {
+func checkTemplateVarConstraints(mentioned map[string]struct{}, required map[string]string, provided map[string]any) error {
 	var missing []string
 	for name := range mentioned {
 		if _, ok := provided[name]; !ok {
@@ -85,4 +99,88 @@ func checkTemplateVars(mentioned map[string]struct{}, required map[string]string
 		return fmt.Errorf("unused required template var(s): %s", strings.Join(unused, ", "))
 	}
 	return nil
+}
+
+// Built-in template functions
+
+// exists(path) returns true if the path exists.
+func builtinExists(args []any) (any, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("exists() requires exactly 1 argument")
+	}
+	path, ok := args[0].(string)
+	if !ok {
+		return false, nil
+	}
+	_, err := os.Lstat(path)
+	return err == nil, nil
+}
+
+// is_dir(path) returns true if the path exists and is a directory.
+func builtinIsDir(args []any) (any, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("is_dir() requires exactly 1 argument")
+	}
+	path, ok := args[0].(string)
+	if !ok {
+		return false, nil
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false, nil
+	}
+	return fi.IsDir(), nil
+}
+
+// is_file(path) returns true if the path exists and is a regular file.
+func builtinIsFile(args []any) (any, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("is_file() requires exactly 1 argument")
+	}
+	path, ok := args[0].(string)
+	if !ok {
+		return false, nil
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false, nil
+	}
+	return fi.Mode().IsRegular(), nil
+}
+
+// find_upward(start, marker1, marker2, ...) walks up from start looking for a
+// directory containing any of the marker paths. Returns the directory path or
+// nil if not found.
+func builtinFindUpward(args []any) (any, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("find_upward() requires at least 2 arguments (start, marker...)")
+	}
+	start, ok := args[0].(string)
+	if !ok {
+		return nil, nil
+	}
+	var markers []string
+	for _, a := range args[1:] {
+		s, ok := a.(string)
+		if !ok {
+			return nil, fmt.Errorf("find_upward() marker arguments must be strings")
+		}
+		markers = append(markers, s)
+	}
+
+	dir := filepath.Clean(start)
+	for {
+		for _, marker := range markers {
+			_, err := os.Lstat(filepath.Join(dir, marker))
+			if err == nil {
+				return dir, nil
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return nil, nil
 }

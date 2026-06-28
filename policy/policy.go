@@ -155,19 +155,19 @@ func Load(path string) (*Policy, error) {
 	return LoadWithOptions(path, nil)
 }
 
-// LoadWithOptions reads and parses a policy file. Files ending in ".j2" are
-// rendered as Jinja-style templates before JSON parsing. If opts is nil,
-// DefaultOptions is used to build the template context.
+// LoadWithOptions reads and parses a policy file. All policy files are
+// rendered through the Jinja-style template engine before JSON parsing.
+// Files ending in ".j2" additionally support --var/--optional-var
+// checking. If opts is nil, DefaultOptions is used.
 func LoadWithOptions(path string, opts *Options) (*Policy, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading policy: %w", err)
 	}
-	if filepath.Ext(path) == ".j2" {
-		data, err = RenderTemplate(data, opts)
-		if err != nil {
-			return nil, fmt.Errorf("rendering policy template: %w", err)
-		}
+	checkVars := filepath.Ext(path) == ".j2"
+	data, err = RenderTemplate(data, opts, checkVars)
+	if err != nil {
+		return nil, fmt.Errorf("rendering policy template: %w", err)
 	}
 	return Parse(data)
 }
