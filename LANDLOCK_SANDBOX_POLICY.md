@@ -35,78 +35,8 @@ enforced via Landlock. Designed to be adaptable to other OS sandboxing mechanism
 
 One file = one complete policy for one program. No composition or inheritance.
 
----
-
-## Jinja Policy Templates (`.j2`)
-
-Policy files whose path ends in `.j2` are rendered as Jinja-style templates
-before the resulting JSON is parsed and validated. This is intended for
-instantiating a policy from explicit CLI-provided parameters while keeping
-environment access separate.
-
-Example `agent.json.j2`:
-
-```jinja
-{
-  "name": "agent-{{ var.profile }}",
-  "fs": [
-    { "path": "{{ configDir }}/landcage/{{ var.profile }}", "access": "r" }
-    {% if var.include_tmp %},
-    { "path": "{{ tmpDir }}", "access": "rwcd" }
-    {% endif %}
-  ],
-  "net": "allow"
-}
-```
-
-Instantiate it with:
-
-```sh
-landcage -p agent.json.j2 \
-  --var profile=default \
-  --optional-var include_tmp=1 \
-  -- agent
-```
-
-### Template Context
-
-| Name | Description |
-|------|-------------|
-| `var.NAME` / `var["NAME"]` | CLI template variable from `--var` or `--optional-var` |
-| `env.NAME` / `env["NAME"]` | Original process environment |
-| `home`, `uid`, `user`, `pwd`, `configDir`, `dataDir`, `cacheDir`, `stateDir`, `runtimeDir`, `tmpDir` | Same built-ins as top-level template context |
-
-### Template Variable Rules
-
-- `--var KEY=VALUE` provides a **required** template variable.
-- Required variables must be mentioned in the template as `var.KEY` or
-  `var["KEY"]`; otherwise rendering fails.
-- `--optional-var KEY=VALUE` provides an optional template variable.
-- Optional variables may be unused.
-- Any `var.KEY` mentioned in the template must be provided by either `--var` or
-  `--optional-var`; otherwise rendering fails.
-- “Mentioned” is based on the parsed template, not the execution path. A
-  `var.KEY` inside an untaken `{% if %}` branch still counts as mentioned.
-- `var` is intentionally separate from `env`; use `env.NAME` to read an
-  environment variable in a template.
-
-### Supported Template Syntax
-
-The template engine is intentionally small and map-based:
-
-- `{{ expr }}` interpolation
-- `{% if %}`, `{% elif %}`, `{% else %}`, `{% endif %}`
-- `{% for item in list %}`, optional `{% else %}`, `{% endfor %}`
-- `{% set name = expr %}` local variable assignment
-- `{% raw %}` / `{% endraw %}`
-- `{# comment #}` (ignored)
-- function calls: `{{ fn(arg1, arg2) }}`
-- dotted and indexed access (`var.name`, `env["HOME"]`, `list[0]`)
-- operators such as `and`, `or`, `not`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `in`,
-  `+`, `-`, `*`, `/`
-- tests: `is defined`, `is undefined`, `is none`, `is true`, `is false`
-
-Unsupported constructs fail rendering rather than being ignored.
+For the template language (`.json.j2` files), see
+[POLICY_TEMPLATES.md](./POLICY_TEMPLATES.md).
 
 ---
 
@@ -225,30 +155,26 @@ Result: `/x:/a:/c:/y`
 
 ### Template Expansion in Values
 
-Since the entire policy file is rendered through the Jinja-style template engine
-before JSON parsing, env values can use template expressions:
+When using `.json.j2` templates, env values can contain template expressions.
+See [POLICY_TEMPLATES.md](./POLICY_TEMPLATES.md) for details. In the expanded
+`.json` policy, all values are plain strings:
 
 ```json
 {
   "env": {
     "FOO": "new",
-    "BAR": "{{ env.FOO or \"default\" }}"
+    "BAR": "/home/user/default-value"
   }
 }
 ```
 
-Note: template expansion happens once, before JSON parsing. `BAR` gets the
-original value of `FOO` from the process environment, not the `"new"` value
-defined in the same policy.
-
 ### Order of Operations
 
-1. Template rendering (entire policy file)
-2. JSON parsing
-3. Glob resolution + directory creation
-4. Landlock enforcement
-5. Environment variable application
-6. Exec child process
+1. JSON parsing
+2. Glob resolution + directory creation
+3. Landlock enforcement
+4. Environment variable application
+5. Exec child process
 
 ---
 
@@ -262,7 +188,7 @@ denied** (allowlist model).
 
 ```json
 {
-  "path": "{{ dataDir }}/myapp",
+  "path": "/home/user/.local/share/myapp",
   "access": "rwcd",
   "refer": true,
   "ioctl_dev": true,
@@ -274,7 +200,7 @@ denied** (allowlist model).
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `path` | string | yes | — | Path (supports template expressions and final-component globs) |
+| `path` | string | yes | — | Path (supports final-component globs) |
 | `access` | string | yes | — | Access flags: combination of `r`, `w`, `x`, `c`, `d` |
 | `refer` | bool | no | `false` | Allow cross-directory link/rename |
 | `ioctl_dev` | bool | no | `false` | Allow device-driver ioctls |
@@ -322,88 +248,7 @@ permitted regardless of this flag.
 - `ioctl_dev` on a non-device path → **warning** (no effect)
 - `create_dir` and `ignore_missing` on same rule → **error** (mutually exclusive)
 - `create_dir` on a path resolving to a file → **error**
-- Empty path after template expansion: treated as missing (respects `ignore_missing`, otherwise error)
-
----
-
-## Template Engine
-
-Policy files with the `.json.j2` extension are rendered through a Jinja-style
-template engine before JSON parsing. Plain `.json` policy files are parsed
-directly without any template processing.
-
-### Syntax
-
-- `{{ expr }}` — interpolation (errors if the expression evaluates to undefined/nil)
-- `{% if %}`, `{% elif %}`, `{% else %}`, `{% endif %}`
-- `{% for item in list %}`, optional `{% else %}`, `{% endfor %}`
-- `{% set name = expr %}` — local variable assignment
-- `{% raw %}` / `{% endraw %}` — output verbatim without processing
-- `{# comment #}` — ignored (not included in output)
-- Function calls: `{{ fn(arg1, arg2) }}`
-- Dotted and indexed access: `env.HOME`, `env["HOME"]`, `list[0]`
-- Operators: `and`, `or`, `not`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `in`, `+`, `-`, `*`, `/`
-- Tests: `is defined`, `is undefined`, `is none`, `is true`, `is false`
-
-### Built-in Context
-
-| Name | Description |
-|------|-------------|
-| `home` | `$HOME` |
-| `uid` | Numeric user ID |
-| `user` | Username |
-| `pwd` | Current working directory |
-| `configDir` | `$XDG_CONFIG_HOME` or `~/.config` |
-| `dataDir` | `$XDG_DATA_HOME` or `~/.local/share` |
-| `cacheDir` | `$XDG_CACHE_HOME` or `~/.cache` |
-| `stateDir` | `$XDG_STATE_HOME` or `~/.local/state` |
-| `runtimeDir` | `$XDG_RUNTIME_DIR` or `/run/user/$UID` |
-| `tmpDir` | `$TMPDIR` or `/tmp` |
-| `env.NAME` / `env["NAME"]` | Process environment variable |
-| `var.NAME` / `var["NAME"]` | CLI template variable (`.j2` files only) |
-
-### Built-in Functions
-
-| Function | Description |
-|----------|-------------|
-| `exists(path)` | Returns true if the path exists |
-| `is_dir(path)` | Returns true if the path exists and is a directory |
-| `is_file(path)` | Returns true if the path exists and is a regular file |
-| `find_upward(start, marker...)` | Walks up from `start` looking for a directory containing any of the marker paths; returns the directory path or nil if not found |
-
-Example:
-
-```jinja
-{% set project_root = find_upward(pwd, ".git", "Cargo.toml") %}
-{% if project_root is defined %}
-  { "path": "{{ project_root }}", "access": "rwcd" }
-{% endif %}
-```
-
-### Strict Output
-
-Any `{{ expr }}` that evaluates to undefined (nil) is a hard error. Use `or` to
-provide a default:
-
-```
-{{ env.CARGO_HOME or (dataDir + "/cargo") }}
-```
-
-This replaces the old `${CARGO_HOME:-${dataDir}/cargo}` syntax.
-
-Conditionals (`{% if %}`) can safely test undefined values without error:
-
-```
-{% if env.OPTIONAL_VAR is defined %}{{ env.OPTIONAL_VAR }}{% endif %}
-```
-
-### Unsupported Constructs
-
-Filters, macros, extends, include, and block inheritance are not supported.
-Attempting to use them fails at parse time.
-
-`{% set %}` is an inline tag (no block/endset form). Its scope is the current
-template level (not limited to the enclosing block).
+- Empty path: treated as missing (respects `ignore_missing`, otherwise error)
 
 ---
 
@@ -560,7 +405,7 @@ between threads of the same process are always permitted.
 
 For full UNIX socket control, combine both mechanisms:
 
-- `ipc.abstract_unix: true` — blocks abstract sockets (no path, can't be controlled per-path)
+- `ipc.abstract_unix: "deny"` — blocks abstract sockets (no path, can't be controlled per-path)
 - `u` flag in `fs` rules — allows connecting to specific pathname sockets
 
 ```json
@@ -588,12 +433,12 @@ For full UNIX socket control, combine both mechanisms:
     { "path": "/dev/urandom", "access": "r" },
     { "path": "/proc/self", "access": "r", "comment": "process introspection" },
 
-    { "path": "{{ home }}/.rustup", "access": "rx", "comment": "Rust toolchains" },
-    { "path": "{{ env.CARGO_HOME or (dataDir + \"/cargo\") }}", "access": "rwcd", "comment": "cargo cache and registry" },
-    { "path": "{{ cacheDir }}/cargo", "access": "rwcd", "create_dir": "0700" },
+    { "path": "/home/user/.rustup", "access": "rx", "comment": "Rust toolchains" },
+    { "path": "/home/user/.local/share/cargo", "access": "rwcd", "comment": "cargo cache and registry" },
+    { "path": "/home/user/.cache/cargo", "access": "rwcd", "create_dir": "0700" },
 
-    { "path": "{{ pwd }}", "access": "rwcd", "refer": true, "comment": "project working directory" },
-    { "path": "{{ tmpDir }}", "access": "rwcd", "comment": "temporary files" },
+    { "path": "/home/user/projects/myapp", "access": "rwcd", "refer": true, "comment": "project working directory" },
+    { "path": "/tmp", "access": "rwcd", "comment": "temporary files" },
 
     { "path": "/run/dbus/system_bus_socket", "access": "u", "comment": "D-Bus access" }
   ],
@@ -648,8 +493,8 @@ How policy fields map to Landlock primitives when enforced on Linux:
 
 | Field | Landlock scope flag |
 |-------|---------------------|
-| `abstract_unix: true` | `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` |
-| `signal: true` | `LANDLOCK_SCOPE_SIGNAL` |
+| `abstract_unix: "deny"` | `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` |
+| `signal: "deny"` | `LANDLOCK_SCOPE_SIGNAL` |
 
 ### Handled access rights (always set in ruleset)
 
