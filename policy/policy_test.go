@@ -508,9 +508,9 @@ func TestResolveScopesGranular(t *testing.T) {
 
 func TestDryRunNetOutput(t *testing.T) {
 	tests := []struct {
-		name   string
-		net    NetConfig
-		want   string
+		name string
+		net  NetConfig
+		want string
 	}{
 		{"deny", NetConfig{}, "Network: deny (all TCP blocked)"},
 		{"allow", NetConfig{Allow: true}, "Network: allow (unrestricted)"},
