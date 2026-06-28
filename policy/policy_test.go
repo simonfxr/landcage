@@ -118,9 +118,9 @@ func TestLoadRendersJ2Policy(t *testing.T) {
 	}
 }
 
-func TestLoadRendersPlainJSONWithBuiltins(t *testing.T) {
+func TestLoadRendersTemplateWithBuiltins(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "policy.json")
+	path := filepath.Join(dir, "policy.json.j2")
 	if err := os.WriteFile(path, []byte(`{
 		"name": "test",
 		"fs": [{"path": "{{ tmpDir }}", "access": "r"}],
@@ -137,6 +137,26 @@ func TestLoadRendersPlainJSONWithBuiltins(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(p.FS) != 1 || p.FS[0].Path != "/my-tmp" {
+		t.Fatalf("unexpected fs rules: %+v", p.FS)
+	}
+}
+
+func TestLoadPlainJSONNoExpansion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	if err := os.WriteFile(path, []byte(`{
+		"name": "test",
+		"fs": [{"path": "/usr", "access": "r"}],
+		"net": "allow"
+	}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := LoadWithOptions(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.FS) != 1 || p.FS[0].Path != "/usr" {
 		t.Fatalf("unexpected fs rules: %+v", p.FS)
 	}
 }

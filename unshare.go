@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -63,13 +64,20 @@ func dropAllCaps() {
 }
 
 // forkChild clones a child into new namespaces and waits for it.
-// Uses clone(2) with all namespace flags — the child is PID 1 in the new PID ns
-// and root (uid 0) in the new user ns (giving it full capabilities for mount etc).
+// The fully-resolved policy is serialized into an internal env var;
+// the child only receives "-- cmd args..." as arguments.
 // Returns (exit code, true) on success, or (0, false) if namespace creation failed.
-func forkChild(cfg *policy.UnshareConfig, args []string) (int, bool) {
+func forkChild(pol *policy.Policy, cmdArgs []string) (int, bool) {
 	self, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: resolving self: %v\n", err)
+		return 1, true
+	}
+
+	// Serialize the resolved policy for the child.
+	policyJSON, err := json.Marshal(pol)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "landcage: serializing policy: %v\n", err)
 		return 1, true
 	}
 
@@ -87,14 +95,19 @@ func forkChild(cfg *policy.UnshareConfig, args []string) (int, bool) {
 	extraFiles = append(extraFiles, pw)
 	setupFD := setupFDIndex + 3 // fd number in child (ExtraFiles[i] → fd i+3)
 
-	cmd := exec.Command(self, args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(), childEnvKey+"=1", fmt.Sprintf("%s=%d", setupFDEnvKey, setupFD))
-	cmd.ExtraFiles = extraFiles
+	child := exec.Command(self, append([]string{"--"}, cmdArgs...)...)
+	child.Stdin = os.Stdin
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
+	child.Env = append(os.Environ(),
+		childEnvKey+"=1",
+		fmt.Sprintf("%s=%d", setupFDEnvKey, setupFD),
+		policyEnvKey+"="+string(policyJSON),
+	)
+	child.ExtraFiles = extraFiles
 
 	var cloneFlags uintptr
+	cfg := pol.Unshare
 	if cfg.User {
 		cloneFlags |= syscall.CLONE_NEWUSER
 	}
@@ -108,7 +121,7 @@ func forkChild(cfg *policy.UnshareConfig, args []string) (int, bool) {
 		cloneFlags |= syscall.CLONE_NEWNS
 	}
 
-	cmd.SysProcAttr = &syscall.SysProcAttr{
+	child.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: cloneFlags,
 		Pdeathsig:  syscall.SIGKILL,
 	}
@@ -118,13 +131,13 @@ func forkChild(cfg *policy.UnshareConfig, args []string) (int, bool) {
 		gid := os.Getegid()
 		// Map current uid/gid to itself inside (like --map-current-user).
 		// AmbientCaps grants CAP_SYS_ADMIN so the child can mount /proc after exec.
-		cmd.SysProcAttr.UidMappings = []syscall.SysProcIDMap{
+		child.SysProcAttr.UidMappings = []syscall.SysProcIDMap{
 			{ContainerID: uid, HostID: uid, Size: 1},
 		}
-		cmd.SysProcAttr.GidMappings = []syscall.SysProcIDMap{
+		child.SysProcAttr.GidMappings = []syscall.SysProcIDMap{
 			{ContainerID: gid, HostID: gid, Size: 1},
 		}
-		cmd.SysProcAttr.AmbientCaps = []uintptr{capSysAdmin}
+		child.SysProcAttr.AmbientCaps = []uintptr{capSysAdmin}
 	}
 
 	// Subscribe to signals BEFORE Start to avoid losing a fast SIGTERM.
@@ -134,7 +147,7 @@ func forkChild(cfg *policy.UnshareConfig, args []string) (int, bool) {
 		syscall.SIGWINCH, syscall.SIGUSR1, syscall.SIGUSR2,
 	)
 
-	if err := cmd.Start(); err != nil {
+	if err := child.Start(); err != nil {
 		signal.Stop(sigCh)
 		pr.Close()
 		pw.Close()
@@ -155,17 +168,17 @@ func forkChild(cfg *policy.UnshareConfig, args []string) (int, bool) {
 	if n == 0 {
 		// Child died or failed during setup — wait and fall back.
 		signal.Stop(sigCh)
-		cmd.Wait()
+		child.Wait()
 		return 0, false
 	}
 
 	go func() {
 		for sig := range sigCh {
-			_ = cmd.Process.Signal(sig)
+			_ = child.Process.Signal(sig)
 		}
 	}()
 
-	err = cmd.Wait()
+	err = child.Wait()
 	signal.Stop(sigCh)
 	close(sigCh)
 

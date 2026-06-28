@@ -328,8 +328,9 @@ permitted regardless of this flag.
 
 ## Template Engine
 
-All policy files are rendered through a Jinja-style template engine before JSON
-parsing. This replaces the old `${...}` variable expansion syntax.
+Policy files with the `.json.j2` extension are rendered through a Jinja-style
+template engine before JSON parsing. Plain `.json` policy files are parsed
+directly without any template processing.
 
 ### Syntax
 

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -126,6 +125,25 @@ func (e *EnvEntry) IsPathOp() bool {
 	return len(e.Prepend) > 0 || len(e.Append) > 0 || len(e.Remove) > 0
 }
 
+func (e EnvEntry) MarshalJSON() ([]byte, error) {
+	if e.Unset {
+		return []byte("null"), nil
+	}
+	if e.Value != nil {
+		return json.Marshal(*e.Value)
+	}
+	obj := struct {
+		Prepend StringBag `json:"prepend,omitempty"`
+		Append  StringBag `json:"append,omitempty"`
+		Remove  StringBag `json:"remove,omitempty"`
+		Sep     string    `json:"sep,omitempty"`
+	}{e.Prepend, e.Append, e.Remove, e.Sep}
+	if obj.Sep == ":" {
+		obj.Sep = "" // omit default
+	}
+	return json.Marshal(obj)
+}
+
 // FSRule defines access to a filesystem path.
 type FSRule struct {
 	Path          string `json:"path"`
@@ -155,19 +173,20 @@ func Load(path string) (*Policy, error) {
 	return LoadWithOptions(path, nil)
 }
 
-// LoadWithOptions reads and parses a policy file. All policy files are
-// rendered through the Jinja-style template engine before JSON parsing.
-// Files ending in ".j2" additionally support --var/--optional-var
-// checking. If opts is nil, DefaultOptions is used.
+// LoadWithOptions reads and parses a policy file. Files ending in ".j2"
+// are rendered through the Jinja-style template engine before JSON parsing;
+// plain .json files are parsed directly without template expansion.
+// If opts is nil, DefaultOptions is used.
 func LoadWithOptions(path string, opts *Options) (*Policy, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading policy: %w", err)
 	}
-	checkVars := filepath.Ext(path) == ".j2"
-	data, err = RenderTemplate(data, opts, checkVars)
-	if err != nil {
-		return nil, fmt.Errorf("rendering policy template: %w", err)
+	if strings.HasSuffix(path, ".j2") {
+		data, err = RenderTemplate(data, opts, true)
+		if err != nil {
+			return nil, fmt.Errorf("rendering policy template: %w", err)
+		}
 	}
 	return Parse(data)
 }

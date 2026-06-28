@@ -12,8 +12,9 @@ go install github.com/simonfxr/landcage@latest
 
 ```
 landcage -p policy.json -- <command> [args...]
-landcage --dry-run -p policy.json --
-landcage -p policy.json.j2 --var name=value --optional-var flag=1 -- <command> [args...]
+landcage -p policy.json.j2 --var name=value -- <command> [args...]
+landcage --expand -p policy.json.j2 --var name=value
+landcage --expand -p policy.json.j2 | my-filter | landcage --policy-json-from-stdin -- <command>
 landcage --policy-json-from-env -- <command> [args...]
 landcage --rw /project --ro /usr -- <command> [args...]
 ```
@@ -71,9 +72,12 @@ See [LANDLOCK_SANDBOX_POLICY.md](LANDLOCK_SANDBOX_POLICY.md) for the full specif
 
 **IPC:** `"deny"` (hard), `"allow"` (explicit), or omit for best-effort deny
 
-**Template variables:** All policy files are rendered through a Jinja-style
-template engine before JSON parsing. Built-in variables are available at the
-top level:
+**Template variables:** Policy files come in two formats:
+
+- **`.json`** — plain JSON, parsed directly (no template expansion)
+- **`.json.j2`** — Jinja-style template, expanded before JSON parsing
+
+Template files (`.json.j2`) have built-in variables available at the top level:
 
 | Variable | Value |
 |----------|-------|
@@ -132,9 +136,21 @@ landcage -p agent.json.j2 \
 mentioned `var.KEY` that was not provided fails template rendering, including
 mentions in untaken branches.
 
-**Inline policy from environment:** `--policy-json-from-env` reads policy JSON
-from the `LANDCAGE_POLICY_JSON` environment variable (which is cleared before
-exec'ing the child). Mutually exclusive with `-p`.
+**Inline policy from environment:** `--policy-json-from-env` reads pre-expanded
+policy JSON from the `LANDCAGE_POLICY_JSON` environment variable (no template
+expansion). Mutually exclusive with `-p`.
+
+**Expand mode:** `--expand` renders the policy and outputs JSON to stdout (no
+enforcement). Works with both `.json` and `.json.j2` files. This enables
+pipelines:
+
+```sh
+landcage --expand -p policy.json.j2 --var profile=dev | my-filter | \
+  landcage --policy-json-from-stdin -- cmd
+```
+
+**Stdin policy:** `--policy-json-from-stdin` reads pre-expanded policy JSON from
+stdin (no template expansion).
 
 **Quick path flags:** `--ro PATH` adds a read+execute rule (like `"access": "rx"`).
 `--rw PATH` adds a full read/write/execute/create/delete+refer rule. Both
