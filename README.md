@@ -111,6 +111,17 @@ set `ignore_missing: true`. These can be combined with `-p` or used standalone.
 - Linux kernel 5.13+ (Landlock V1) — more features with newer kernels
 - Landlock enabled at boot (`CONFIG_SECURITY_LANDLOCK=y`)
 
+## Kernel Compatibility
+
+Policies are portable across kernel versions. ABI-gated filesystem flags
+(`u`, `refer`, `ioctl_dev`, and `truncate` implied by `w`) are **silently
+dropped** on kernels that don't support them, with a warning on stderr.
+This lets you write one policy that works on both older and newer kernels.
+
+Network rules and IPC `"deny"` are **not** downgraded — they will error
+if the kernel is too old, since silently skipping them would compromise
+the sandbox.
+
 ## How It Works
 
 1. Loads the policy (renders Jinja template if `.json.j2`, otherwise parses directly)

@@ -290,6 +290,13 @@ path (symlink or direct) reaching the same inode are covered by a single rule.
 - **Deny-all by default.** Only paths with explicit rules are accessible.
 - The tool handles the maximum set of access rights supported by the running kernel.
 - Unhandled access rights (those the kernel doesn't support yet) remain unrestricted.
+- **Graceful downgrade:** ABI-gated FS flags (`u`/resolve_unix, `refer`, `ioctl_dev`,
+  truncate via `w`) are silently dropped on kernels that don't support them. A warning
+  is printed to stderr, but enforcement proceeds with the remaining flags. This makes
+  policies portable across kernel versions without requiring per-kernel policy variants.
+- Network rules and IPC `"deny"` are **not** downgraded — they error if the kernel
+  cannot enforce them, because silently running without network or IPC isolation
+  would violate the policy's security intent.
 - Mount operations (`mount`, `umount`, `pivot_root`, `remount`) are **always denied** for any sandboxed process with filesystem rules.
 
 ---

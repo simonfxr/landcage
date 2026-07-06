@@ -423,6 +423,15 @@ func TestFSAccessSetFileUnixSocketResolve(t *testing.T) {
 	if access != llsys.AccessFSResolveUnix {
 		t.Errorf("got access %d, want RESOLVE_UNIX %d", access, llsys.AccessFSResolveUnix)
 	}
+
+	// On ABI 8, 'u' alone results in zero access (silently dropped)
+	access, err = fsAccessSet(r, false, FeaturesForABI(8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if access != 0 {
+		t.Errorf("got access %d on ABI 8, want 0 (resolve_unix dropped)", access)
+	}
 }
 
 func TestFSAccessSetTruncateDowngrade(t *testing.T) {
@@ -441,6 +450,76 @@ func TestFSAccessSetTruncateDowngrade(t *testing.T) {
 	}
 	if access&llsys.AccessFSTruncate != 0 {
 		t.Error("expected truncate to NOT be set on ABI 2")
+	}
+}
+
+func TestFSAccessSetResolveUnixDowngrade(t *testing.T) {
+	r := &FSRule{Path: "/tmp", Access: "rwu"}
+
+	// On ABI 9+, resolve_unix should be present
+	access, err := fsAccessSet(r, true, FeaturesForABI(9))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if access&llsys.AccessFSResolveUnix == 0 {
+		t.Error("expected resolve_unix to be set on ABI 9")
+	}
+
+	// On ABI 8, resolve_unix should be silently dropped
+	access, err = fsAccessSet(r, true, FeaturesForABI(8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if access&llsys.AccessFSResolveUnix != 0 {
+		t.Error("expected resolve_unix to NOT be set on ABI 8")
+	}
+	// But write should still be present
+	if access&llsys.AccessFSWriteFile == 0 {
+		t.Error("expected write to still be set on ABI 8")
+	}
+}
+
+func TestFSAccessSetReferDowngrade(t *testing.T) {
+	r := &FSRule{Path: "/tmp", Access: "rw", Refer: true}
+
+	// On ABI 2+, refer should be present
+	access, err := fsAccessSet(r, true, FeaturesForABI(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if access&llsys.AccessFSRefer == 0 {
+		t.Error("expected refer to be set on ABI 2")
+	}
+
+	// On ABI 1, refer should be silently dropped
+	access, err = fsAccessSet(r, true, FeaturesForABI(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if access&llsys.AccessFSRefer != 0 {
+		t.Error("expected refer to NOT be set on ABI 1")
+	}
+}
+
+func TestFSAccessSetIoctlDevDowngrade(t *testing.T) {
+	r := &FSRule{Path: "/dev/null", Access: "rw", IoctlDev: true}
+
+	// On ABI 5+, ioctl_dev should be present
+	access, err := fsAccessSet(r, false, FeaturesForABI(5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if access&llsys.AccessFSIoctlDev == 0 {
+		t.Error("expected ioctl_dev to be set on ABI 5")
+	}
+
+	// On ABI 4, ioctl_dev should be silently dropped
+	access, err = fsAccessSet(r, false, FeaturesForABI(4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if access&llsys.AccessFSIoctlDev != 0 {
+		t.Error("expected ioctl_dev to NOT be set on ABI 4")
 	}
 }
 

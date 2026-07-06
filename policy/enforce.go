@@ -56,12 +56,14 @@ func Enforce(p *Policy) error {
 }
 
 // validatePolicyFeatures checks that the policy does not request features
-// the current kernel cannot provide.
+// the current kernel cannot provide. For FS access flags, unsupported flags
+// are silently downgraded (dropped) by fsAccessSet, so we only emit a warning.
+// Network and IPC hard-deny still error because there is no safe downgrade.
 func validatePolicyFeatures(p *Policy, feat LandlockFeatures) error {
 	for i, r := range p.FS {
 		unsupported := feat.ValidateFSAccess(&r)
 		if len(unsupported) > 0 {
-			return fmt.Errorf("fs rule %d (%s): unsupported access flags on kernel ABI %d: %s",
+			fmt.Fprintf(os.Stderr, "landcage: warning: fs rule %d (%s): downgrading unsupported access flags on kernel ABI %d: %s\n",
 				i, r.Path, feat.ABI, strings.Join(unsupported, "; "))
 		}
 	}
@@ -207,8 +209,9 @@ func buildFSRules(r *FSRule, feat LandlockFeatures) ([]ll.Rule, error) {
 }
 
 // fsAccessSet translates a policy FSRule into a go-landlock AccessFSSet.
-// The feat parameter gates ABI-dependent flags (e.g., truncate is silently
-// dropped on pre-ABI-3 kernels so that write-only policies remain usable).
+// The feat parameter gates ABI-dependent flags: flags unsupported by the
+// current kernel are silently dropped so that policies remain portable
+// across kernel versions.
 func fsAccessSet(r *FSRule, isDir bool, feat LandlockFeatures) (ll.AccessFSSet, error) {
 	var access ll.AccessFSSet
 	for _, ch := range r.Access {
@@ -238,13 +241,15 @@ func fsAccessSet(r *FSRule, isDir bool, feat LandlockFeatures) (ll.AccessFSSet, 
 			}
 			access |= llsys.AccessFSRemoveFile | llsys.AccessFSRemoveDir
 		case 'u':
-			access |= llsys.AccessFSResolveUnix
+			if feat.SupportsResolveUnix() {
+				access |= llsys.AccessFSResolveUnix
+			}
 		}
 	}
-	if r.Refer {
+	if r.Refer && feat.SupportsRefer() {
 		access |= llsys.AccessFSRefer
 	}
-	if r.IoctlDev {
+	if r.IoctlDev && feat.SupportsIoctlDev() {
 		access |= llsys.AccessFSIoctlDev
 	}
 	return access, nil
