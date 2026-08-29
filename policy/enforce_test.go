@@ -40,6 +40,17 @@ func runHelper(mode string) int {
 		pol.Net.Allow = true
 	case "net-port-80":
 		pol.Net.Rules = []NetRule{{Port: 80, Access: "connect"}}
+	case "udp-deny":
+		// deny all, then probe UDP
+	case "udp-tcp-only":
+		pol.Net.Rules = []NetRule{{Port: 80, Access: "connect"}}
+	case "udp-port-1":
+		pol.Net.Rules = []NetRule{
+			{Port: 1, Access: "connect", Proto: "udp"},
+			{Port: 0, Access: "bind", Proto: "udp"},
+		}
+	case "udp-port-1-no-bind":
+		pol.Net.Rules = []NetRule{{Port: 1, Access: "connect", Proto: "udp"}}
 	case "unix-no-u":
 		// /tmp has rwcd but no 'u' → connect to UNIX socket should be blocked
 	case "unix-with-u":
@@ -55,6 +66,9 @@ func runHelper(mode string) int {
 
 	if strings.HasPrefix(mode, "unix-") {
 		return helperUnixConnect()
+	}
+	if strings.HasPrefix(mode, "udp-") {
+		return helperUDPConnect()
 	}
 	return helperTCPConnect()
 }
@@ -77,6 +91,24 @@ func helperTCPConnect() int {
 	}
 	// Connection refused = kernel allowed the connect attempt (no Landlock block)
 	os.Stdout.WriteString("REFUSED")
+	return 0
+}
+
+func helperUDPConnect() int {
+	conn, err := net.DialTimeout("udp", "127.0.0.1:1", 2*time.Second)
+	if conn != nil {
+		conn.Close()
+	}
+	if err == nil {
+		os.Stdout.WriteString("CONNECTED")
+		return 0
+	}
+	if isPermissionError(err) {
+		os.Stdout.WriteString("BLOCKED")
+		return 0
+	}
+	os.Stderr.WriteString("unexpected: " + err.Error() + "\n")
+	os.Stdout.WriteString("ERROR")
 	return 0
 }
 
@@ -141,6 +173,46 @@ func TestEnforceNetPort80(t *testing.T) {
 	}
 }
 
+func TestEnforceUDPDeny(t *testing.T) {
+	requireUDP(t)
+	result := runEnforceHelper(t, "udp-deny")
+	if result != "BLOCKED" {
+		t.Errorf("net=deny: UDP connect should be BLOCKED, got %q", result)
+	}
+}
+
+func TestEnforceUDPTCPOnly(t *testing.T) {
+	requireUDP(t)
+	result := runEnforceHelper(t, "udp-tcp-only")
+	if result != "BLOCKED" {
+		t.Errorf("tcp-only rules: UDP connect should be BLOCKED, got %q", result)
+	}
+}
+
+func TestEnforceUDPPort1(t *testing.T) {
+	requireUDP(t)
+	result := runEnforceHelper(t, "udp-port-1")
+	if result != "CONNECTED" {
+		t.Errorf("udp connect:1 + bind:0: expected CONNECTED, got %q", result)
+	}
+}
+
+func TestEnforceUDPPort1NoBind(t *testing.T) {
+	requireUDP(t)
+	result := runEnforceHelper(t, "udp-port-1-no-bind")
+	if result != "BLOCKED" {
+		t.Errorf("udp connect without bind 0: autobind should be BLOCKED, got %q", result)
+	}
+}
+
+func requireUDP(t *testing.T) {
+	t.Helper()
+	feat, err := DetectFeatures()
+	if err != nil || !feat.SupportsUDP() {
+		t.Skip("requires Landlock ABI >= 10")
+	}
+}
+
 func TestEnforceUnixNoU(t *testing.T) {
 	feat, err := DetectFeatures()
 	if err != nil || !feat.SupportsResolveUnix() {
@@ -164,7 +236,10 @@ func TestEnforceUnixWithU(t *testing.T) {
 	}
 
 	sockPath := filepath.Join("/tmp", "landcage_test_u_"+strings.Replace(time.Now().Format("150405.000"), ".", "", 1)+".sock")
-	ln := listenUnix(t, sockPath)
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Skipf("cannot bind UNIX socket in /tmp (outer sandbox?): %v", err)
+	}
 	defer ln.Close()
 	defer os.Remove(sockPath)
 

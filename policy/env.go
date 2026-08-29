@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"slices"
 	"strings"
 )
 
@@ -50,8 +51,8 @@ func resolveEnvEntry(name string, e *EnvEntry, env Environ) (string, bool) {
 	}
 
 	// Prepend
-	for i := len(e.Prepend) - 1; i >= 0; i-- {
-		parts = append([]string{e.Prepend[i]}, parts...)
+	for _, v := range slices.Backward(e.Prepend) {
+		parts = append([]string{v}, parts...)
 	}
 
 	// Append

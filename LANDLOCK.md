@@ -4,7 +4,7 @@ Landlock is an unprivileged, stackable access-control mechanism that allows
 processes to sandbox themselves. No root privileges or special capabilities are
 required — only the `no_new_privs` flag (or `CAP_SYS_ADMIN`).
 
-**Current ABI version: 9 (in development, not yet released upstream)**
+**Current ABI version: 10 (Linux 7.2)**
 
 ---
 
@@ -70,7 +70,7 @@ Adds an allow-rule to an existing ruleset.
 | `ruleset_fd` | File descriptor returned by `landlock_create_ruleset()` |
 | `rule_type` | `LANDLOCK_RULE_PATH_BENEATH` or `LANDLOCK_RULE_NET_PORT` |
 | `rule_attr` | Pointer to rule struct matching `rule_type` |
-| `flags` | Must be 0 |
+| `flags` | `0` or `LANDLOCK_ADD_RULE_QUIET` (ABI 10+) |
 
 **Returns:** `0` on success, `-1` with errno on failure.
 
@@ -79,13 +79,24 @@ Adds an allow-rule to an existing ruleset.
 | errno | Condition |
 |-------|-----------|
 | `EOPNOTSUPP` | Landlock disabled at boot |
-| `EAFNOSUPPORT` | `LANDLOCK_RULE_NET_PORT` used but TCP/IP not compiled in |
-| `EINVAL` | Non-zero flags, `allowed_access` not a subset of handled accesses, or port > 65535 |
-| `ENOMSG` | `allowed_access` is 0 (empty rule) |
+| `EAFNOSUPPORT` | `LANDLOCK_RULE_NET_PORT` used but TCP/IP (or UDP, for UDP rights) not compiled in |
+| `EINVAL` | Unknown flags, `allowed_access` not a subset of handled accesses, or port > 65535 |
+| `ENOMSG` | `allowed_access` is 0 (empty rule), unless `LANDLOCK_ADD_RULE_QUIET` is set |
 | `EBADF` | Invalid `ruleset_fd` or invalid `parent_fd` in rule attr |
 | `EBADFD` | `ruleset_fd` is not a ruleset FD, or `parent_fd` is not a valid path FD |
 | `EPERM` | `ruleset_fd` lacks write access |
 | `EFAULT` | `rule_attr` is not a valid address |
+
+**Flags:**
+
+| Flag | ABI | Description |
+|------|-----|-------------|
+| `LANDLOCK_ADD_RULE_QUIET` | 10 | Mark this object so denials of `quiet_*` accesses on this layer are not audit-logged. Empty `allowed_access` is allowed when this flag is set (a quiet-only rule). The quiet bit is sticky: a later add-rule on the same object without this flag does not clear it. |
+
+A sandboxed program cannot use this flag to hide denials it does not itself
+enforce. Logging is suppressed only when this layer is the innermost denier,
+the denied accesses are listed in the matching `quiet_*` field, and the object
+(or a parent, for filesystem rules) was marked quiet.
 
 ---
 
@@ -146,10 +157,15 @@ struct landlock_ruleset_attr {
     __u64 handled_access_fs;   /* Bitmask of LANDLOCK_ACCESS_FS_* */
     __u64 handled_access_net;  /* Bitmask of LANDLOCK_ACCESS_NET_* */
     __u64 scoped;              /* Bitmask of LANDLOCK_SCOPE_* */
+    __u64 quiet_access_fs;     /* ABI 10+: FS denials to suppress in audit */
+    __u64 quiet_access_net;    /* ABI 10+: net denials to suppress in audit */
+    __u64 quiet_scoped;        /* ABI 10+: scope denials to suppress in audit */
 };
 ```
 
-Size: 24 bytes. Extensible in future ABI versions.
+Size: 24 bytes through ABI 9; 48 bytes from ABI 10 (`quiet_*` fields). Extensible
+in future ABI versions. Each `quiet_*` bitmask must be a subset of the matching
+`handled_access_*` / `scoped` field. See [Quiet Rules](#quiet-rules-abi-10) below.
 
 ---
 
@@ -229,8 +245,14 @@ Used in `handled_access_net` and `landlock_net_port_attr.allowed_access`.
 |------|-------|-----|-------------|
 | `LANDLOCK_ACCESS_NET_BIND_TCP` | `1 << 0` | 4 | Bind a TCP socket to a local port |
 | `LANDLOCK_ACCESS_NET_CONNECT_TCP` | `1 << 1` | 4 | Connect a TCP socket to a remote port |
+| `LANDLOCK_ACCESS_NET_BIND_UDP` | `1 << 2` | 10 | Bind a UDP socket to a local port (includes kernel autobind of an ephemeral port) |
+| `LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP` | `1 << 3` | 10 | `connect()` a UDP socket to a remote port, or `sendto()`/`sendmsg()` to that port |
 
-**Note:** Port 0 with `BIND_TCP` allows binding to a kernel-assigned ephemeral port.
+**Notes:**
+
+- Port 0 with `BIND_TCP` or `BIND_UDP` allows binding to a kernel-assigned ephemeral port.
+- TCP rights never restrict UDP (and vice versa). On kernels before ABI 10, UDP is unrestricted by Landlock.
+- If both `BIND_UDP` and `CONNECT_SEND_UDP` are handled, sending a datagram from an unbound socket autobinds an ephemeral source port. To allow that, grant `BIND_UDP` on port 0, grant `BIND_UDP` on a specific port and `bind()` first, or use a socket that was already bound before the ruleset was enforced.
 
 ### Scope Flags (`LANDLOCK_SCOPE_*`)
 
@@ -450,6 +472,8 @@ rule returns `EINVAL`.
 | `truncate()` / `ftruncate()` | `TRUNCATE` |
 | `ioctl()` on devices | `IOCTL_DEV` |
 | `connect()` to pathname UNIX socket | `RESOLVE_UNIX` |
+| `bind()` UDP / UDP autobind | `BIND_UDP` (ABI 10) |
+| `connect()` / `sendto()` UDP | `CONNECT_SEND_UDP` (ABI 10) |
 | `mount()` / `umount()` / `pivot_root()` / `remount()` | **Always denied** (see below) |
 
 #### Mount Operations Are Always Denied
@@ -535,8 +559,8 @@ information-leak surface that future Landlock versions may address.
 
 #### `LANDLOCK_ACCESS_NET_CONNECT_TCP`
 
-Hooks into the `connect(2)` syscall for **TCP sockets only**. Non-TCP sockets
-(UDP, SCTP, raw, etc.) are completely unrestricted.
+Hooks into the `connect(2)` syscall for **TCP sockets only**. UDP, SCTP, raw,
+and other socket types are not checked by this right.
 
 The check:
 1. Extracts the destination **port** from the `sockaddr` (IPv4 or IPv6)
@@ -548,7 +572,6 @@ Key behaviors:
   443 allows connecting to *any* host on port 443.
 - **`AF_UNSPEC` always allowed** — `connect(sock, {AF_UNSPEC})` dissolves a TCP
   association (disconnect). This is treated as "closing" and never blocked.
-- **No UDP/SCTP** — only TCP `connect()` is checked.
 - **Already-connected sockets** — not affected; only the `connect()` call itself.
 
 #### `LANDLOCK_ACCESS_NET_BIND_TCP`
@@ -558,6 +581,52 @@ Hooks into `bind(2)` for TCP sockets. Same port-based lookup as `CONNECT_TCP`.
 Port 0 with `BIND_TCP` means "allow the kernel to assign an ephemeral port."
 The ephemeral range is configurable via
 `/proc/sys/net/ipv4/ip_local_port_range`.
+
+#### `LANDLOCK_ACCESS_NET_BIND_UDP` (ABI 10)
+
+Hooks into `bind(2)` for UDP sockets, and also into the kernel autobind that
+happens when an unbound UDP socket first sends a datagram or is `connect()`ed.
+Access control runs when the local port is configured, not on every
+`send`/`recv`.
+
+Port 0 with `BIND_UDP` means "allow any port in the ephemeral range" — the same
+special case as TCP.
+
+#### `LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP` (ABI 10)
+
+Controls two operations on UDP sockets:
+
+1. `connect(2)` setting a remote port
+2. `sendto(2)` / `sendmsg(2)` to an explicit remote port (the destination on
+   the call is used; a previously `connect()`ed peer is ignored for this check)
+
+Like the TCP rights, only the **port** is checked, not the remote IP.
+
+**Autobind interaction:** the first `connect()` or `sendto()` on an unbound UDP
+socket also assigns an ephemeral local port. If the ruleset handles both
+`BIND_UDP` and `CONNECT_SEND_UDP`, that autobind needs its own `BIND_UDP`
+allow (typically port 0).
+
+**IPv6 note:** sending datagrams to an `AF_UNSPEC` destination is not supported
+for IPv6 UDP sockets — use a `NULL` address instead.
+
+### Quiet Rules (ABI 10)
+
+Landlock audit logs every denial by default (subject to `RESTRICT_SELF_LOG_*`).
+ABI 10 adds a way to suppress logs for **expected** denials on specific objects,
+without weakening the sandbox:
+
+1. List the access rights whose denials may be quieted in `quiet_access_fs`,
+   `quiet_access_net`, and/or `quiet_scoped` at ruleset creation. These must
+   be subsets of the corresponding handled/scoped bitmasks.
+2. Mark objects with `LANDLOCK_ADD_RULE_QUIET` when adding a path or port rule.
+   For scopes there is no object: setting `quiet_scoped` is enough.
+3. A denial is omitted from the log only if this layer is the innermost one
+   that denied the access, the denied bits are in `quiet_*`, and the object
+   (or a parent directory) is marked quiet.
+
+This cannot hide denials from an outer domain, and cannot suppress a denial
+the layer does not itself enforce.
 
 ---
 
@@ -642,8 +711,9 @@ struct landlock_ruleset_attr attr = {
 // /dev/null      → READ_FILE | WRITE_FILE
 
 // Network rules:
-// port 443       → CONNECT_TCP
-// port 53        → CONNECT_TCP
+// port 443       → CONNECT_TCP (ABI 4+, Linux 6.7+)
+// port 53        → CONNECT_TCP | CONNECT_SEND_UDP (ABI 10+, Linux 7.2+)
+// port 0         → BIND_UDP (ABI 10+, Linux 7.2+; ephemeral autobind)
 
 // Result: app can only execute from /usr, read configs,
 //         write to its own dirs, connect to HTTPS/DNS,
@@ -760,6 +830,19 @@ int main(void) {
 | 4 | 6.7 | Network rules (`BIND_TCP`, `CONNECT_TCP`) |
 | 5 | 6.10 | `LANDLOCK_ACCESS_FS_IOCTL_DEV` |
 | 6 | 6.12 | Scope flags (`ABSTRACT_UNIX_SOCKET`, `SIGNAL`) |
-| 7 | 6.13 | (no new user-visible access rights) |
-| 8 | 6.14 | (no new user-visible access rights) |
-| 9 | TBD (unreleased) | `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, `RESTRICT_SELF_TSYNC`, logging flags, errata |
+| 7 | 6.15 | `RESTRICT_SELF_LOG_*` audit flags, errata query |
+| 8 | 7.0 | `RESTRICT_SELF_TSYNC` |
+| 9 | 7.1 | `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` |
+| 10 | 7.2 | UDP (`BIND_UDP`, `CONNECT_SEND_UDP`), quiet rules (`ADD_RULE_QUIET`, `quiet_*` attr fields) |
+
+Kernel versions for ABI 7–10 are the first `v*` tags on the Linux 7.2.2 tree
+that contain each bump (`security/landlock/syscalls.c` `landlock_abi_version`).
+The running 7.2 kernel reports ABI 10 via `landlock_create_ruleset(..., LANDLOCK_CREATE_RULESET_VERSION)`.
+
+**landcage status:** when `net` is restricted, landcage handles TCP bind/connect
+(ABI 4+) and UDP bind/connect-send (ABI 10+). Unspecified ports are denied.
+Rules default to `"proto": "tcp"`; UDP must be allowed explicitly. Explicit UDP
+rules error on ABI < 10. On ABI 4–9, UDP cannot be restricted (warning only).
+This is an intentional break: TCP-only policies that relied on unrestricted UDP
+(typically DNS) need explicit `udp`/`any` allows, plus `"bind"` on port 0
+for UDP autobind.

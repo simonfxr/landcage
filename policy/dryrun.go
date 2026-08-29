@@ -97,19 +97,27 @@ func DryRun(p *Policy, w io.Writer) error {
 	} else if len(p.Net.Rules) > 0 {
 		netWarn := ""
 		if !feat.SupportsNet() {
-			netWarn = fmt.Sprintf(" [WARN: network requires ABI >= 4, kernel has ABI %d]", feat.ABI)
+			netWarn = fmt.Sprintf(" [WARN: network requires ABI >= 4 / Linux >= 6.7, kernel has ABI %d]", feat.ABI)
+		} else if !feat.SupportsUDP() {
+			netWarn = fmt.Sprintf(" [WARN: UDP unrestricted on ABI %d, requires ABI >= 10 / Linux >= 7.2]", feat.ABI)
 		}
 		fmt.Fprintf(w, "Network rules:%s\n", netWarn)
 		for i, r := range p.Net.Rules {
-			fmt.Fprintf(w, "  [%d] port %d \u2192 %s\n", i, r.Port, r.Access)
+			udpWarn := ""
+			if r.usesUDP() && !feat.SupportsUDP() {
+				udpWarn = fmt.Sprintf(" [ERROR: udp requires ABI >= 10 / Linux >= 7.2, kernel has ABI %d; enforcement would fail]", feat.ABI)
+			}
+			fmt.Fprintf(w, "  [%d] port %d/%s \u2192 %s%s\n", i, r.Port, r.protoName(), r.Access, udpWarn)
 		}
 		fmt.Fprintln(w)
 	} else {
 		netNote := ""
 		if !feat.SupportsNet() {
-			netNote = fmt.Sprintf(" [WARN: not enforced, requires ABI >= 4, kernel has ABI %d]", feat.ABI)
+			netNote = fmt.Sprintf(" [WARN: requires ABI >= 4 / Linux >= 6.7, kernel has ABI %d]", feat.ABI)
+		} else if !feat.SupportsUDP() {
+			netNote = fmt.Sprintf(" [WARN: UDP unrestricted on ABI %d]", feat.ABI)
 		}
-		fmt.Fprintf(w, "Network: deny (all TCP blocked)%s\n\n", netNote)
+		fmt.Fprintf(w, "Network: deny (%s)%s\n\n", netDenySummary(feat), netNote)
 	}
 
 	// IPC
@@ -166,4 +174,14 @@ func DryRun(p *Policy, w io.Writer) error {
 	}
 
 	return nil
+}
+
+func netDenySummary(feat LandlockFeatures) string {
+	if !feat.SupportsNet() {
+		return "not enforced; TCP and UDP unrestricted"
+	}
+	if feat.SupportsUDP() {
+		return "all TCP and UDP blocked"
+	}
+	return "all TCP blocked; UDP unrestricted"
 }

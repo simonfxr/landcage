@@ -71,6 +71,11 @@ func validatePolicyFeatures(p *Policy, feat LandlockFeatures) error {
 	if err := feat.ValidateNet(&p.Net); err != nil {
 		return err
 	}
+	if !p.Net.Allow && !feat.SupportsNet() {
+		fmt.Fprintf(os.Stderr, "landcage: warning: network unrestricted on kernel ABI %d (TCP restrictions require ABI >= 4 / Linux >= 6.7)\n", feat.ABI)
+	} else if !p.Net.Allow && !feat.SupportsUDP() {
+		fmt.Fprintf(os.Stderr, "landcage: warning: UDP unrestricted on kernel ABI %d (requires ABI >= 10 / Linux >= 7.2)\n", feat.ABI)
+	}
 
 	if err := feat.ValidateIPC(p.IPC); err != nil {
 		return err
@@ -257,14 +262,30 @@ func fsAccessSet(r *FSRule, isDir bool, feat LandlockFeatures) (ll.AccessFSSet, 
 
 func buildNetRules(r *NetRule) []ll.Rule {
 	var rules []ll.Rule
+	tcp := r.usesTCP()
+	udp := r.usesUDP()
 	switch r.Access {
 	case "connect":
-		rules = append(rules, ll.ConnectTCP(r.Port))
+		if tcp {
+			rules = append(rules, ll.ConnectTCP(r.Port))
+		}
+		if udp {
+			rules = append(rules, ll.ConnectSendUDP(r.Port))
+		}
 	case "bind":
-		rules = append(rules, ll.BindTCP(r.Port))
+		if tcp {
+			rules = append(rules, ll.BindTCP(r.Port))
+		}
+		if udp {
+			rules = append(rules, ll.BindUDP(r.Port))
+		}
 	case "connect+bind":
-		rules = append(rules, ll.ConnectTCP(r.Port))
-		rules = append(rules, ll.BindTCP(r.Port))
+		if tcp {
+			rules = append(rules, ll.ConnectTCP(r.Port), ll.BindTCP(r.Port))
+		}
+		if udp {
+			rules = append(rules, ll.ConnectSendUDP(r.Port), ll.BindUDP(r.Port))
+		}
 	}
 	return rules
 }

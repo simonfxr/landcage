@@ -18,8 +18,9 @@
     { "path": "{{ tmpDir }}", "access": "rwcd", "comment": "temporary files" }
   ],
   "net": [
-    { "port": 443, "access": "connect", "comment": "HTTPS (crates.io)" },
-    { "port": 53, "access": "connect", "comment": "DNS resolution" }
+    { "port": 443, "access": "connect", "comment": "HTTPS over TCP (ABI 4+, Linux 6.7+)" },
+    { "port": 53, "access": "connect", "proto": "any", "comment": "DNS over TCP+UDP (ABI 10+, Linux 7.2+)" },
+    { "port": 0, "access": "bind", "proto": "udp", "comment": "UDP autobind for DNS (ABI 10+, Linux 7.2+)" }
   ],
   "ipc": {
     "abstract_unix": "deny",

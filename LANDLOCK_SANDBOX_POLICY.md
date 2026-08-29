@@ -294,22 +294,42 @@ path (symlink or direct) reaching the same inode are covered by a single rule.
   truncate via `w`) are silently dropped on kernels that don't support them. A warning
   is printed to stderr, but enforcement proceeds with the remaining flags. This makes
   policies portable across kernel versions without requiring per-kernel policy variants.
-- Network rules and IPC `"deny"` are **not** downgraded — they error if the kernel
-  cannot enforce them, because silently running without network or IPC isolation
-  would violate the policy's security intent.
+- Per-port network rules and IPC `"deny"` are **not** downgraded — they error if
+  the kernel cannot enforce them, because silently running without network or
+  IPC isolation would violate the policy's security intent. UDP rules require
+  ABI 10 / Linux 7.2. On ABI 4–9, TCP-only net restriction proceeds and UDP
+  stays unrestricted (warning). `"net": "deny"` is best effort as described
+  below.
 - Mount operations (`mount`, `umount`, `pivot_root`, `remount`) are **always denied** for any sandboxed process with filesystem rules.
 
 ---
 
 ## Network Rules (`net`)
 
-The `net` field controls TCP bind and connect operations. **All TCP operations
-are denied by default** unless explicitly permitted.
+The `net` field controls TCP and UDP bind/connect operations. **All handled
+network operations are denied by default** unless explicitly permitted.
+
+TCP bind/connect are handled on ABI 4+ (Linux 6.7+). UDP bind and connect/send
+are handled on ABI 10+ (Linux 7.2+), so unspecified UDP is denied the same way
+as TCP.
+
+| Policy option | Minimum Landlock ABI | Minimum Linux | Behavior |
+|---------------|----------------------|---------------|----------|
+| `"net": "allow"` | 1 | 5.13 | No network restriction requested |
+| `"net": "deny"` | 4 / 10 | 6.7 / 7.2 | Denies TCP from ABI 4; TCP and UDP from ABI 10 |
+| `"proto": "tcp"` or omitted | 4 | 6.7 | TCP bind/connect |
+| `"proto": "udp"` | 10 | 7.2 | UDP bind/connect/send |
+| `"proto": "any"` | 10 | 7.2 | Both TCP and UDP rights |
+
+Explicit UDP and `"any"` rules fail closed on older kernels rather than being
+silently dropped. On ABI 4–9, a TCP-only policy still runs, but UDP remains
+unrestricted because Landlock cannot mediate it. Before ABI 4 / Linux 6.7,
+Landlock cannot mediate network access at all.
 
 ### Allowing All Network
 
-Set `"net": "allow"` to leave TCP completely unrestricted (network access rights
-are not declared as handled, so Landlock does not restrict them):
+Set `"net": "allow"` to leave TCP and UDP completely unrestricted (network
+access rights are not declared as handled, so Landlock does not restrict them):
 
 ```json
 { "net": "allow" }
@@ -317,54 +337,75 @@ are not declared as handled, so Landlock does not restrict them):
 
 ### Denying All Network
 
-Set `"net": "deny"` to explicitly block all network access. This is equivalent to
-omitting the `net` field or setting it to `null`, but is more readable in templates:
+Set `"net": "deny"` to block all network access that the running Landlock ABI
+can mediate. This is equivalent to omitting the `net` field or setting it to
+`null`, but is more readable in templates:
 
 ```json
 { "net": "deny" }
 ```
 
+On ABI 10+ (Linux 7.2+) this denies TCP and UDP. On ABI 4–9
+(Linux 6.7–7.1) only TCP is denied because UDP cannot be restricted. Before
+ABI 4, neither protocol is restricted. Enforcement prints a warning whenever
+the requested deny cannot cover both protocols.
+
 ### Rule Object
 
 ```json
-{ "port": 443, "access": "connect", "comment": "HTTPS" }
+{ "port": 443, "access": "connect", "proto": "tcp", "comment": "HTTPS" }
 ```
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `port` | integer | yes | — | TCP port (0–65535) |
+| `port` | integer | yes | — | Port (0–65535) |
 | `access` | string | yes | — | `"connect"`, `"bind"`, or `"connect+bind"` |
+| `proto` | string | no | `"tcp"` | `"tcp"`, `"udp"`, or `"any"` |
 | `comment` | string | no | — | Ignored; for documentation |
 
 ### Access Values
 
-| Value | Landlock right | Description |
-|-------|---------------|-------------|
-| `"connect"` | `ACCESS_NET_CONNECT_TCP` | Allow `connect()` to this remote port |
-| `"bind"` | `ACCESS_NET_BIND_TCP` | Allow `bind()` to this local port |
-| `"connect+bind"` | Both | Allow both operations on this port |
+| Value | TCP (default / `"tcp"`) | UDP (`"udp"`) |
+|-------|-------------------------|---------------|
+| `"connect"` | `ACCESS_NET_CONNECT_TCP` | `ACCESS_NET_CONNECT_SEND_UDP` |
+| `"bind"` | `ACCESS_NET_BIND_TCP` | `ACCESS_NET_BIND_UDP` |
+| `"connect+bind"` | Both TCP rights | Both UDP rights |
+
+`"proto": "any"` grants the TCP and UDP rights for the same access/port and
+therefore requires ABI 10+ (Linux 7.2+).
 
 ### Notes
 
-- **TCP only** — UDP, SCTP, and other protocols are not restricted by Landlock.
 - **Port-based only** — destination/source IP is not checked. A rule allowing
   port 443 permits connecting to any host on port 443.
 - Port 0 with `"bind"` allows binding to a kernel-assigned ephemeral port.
-- `connect(AF_UNSPEC)` (disconnect) is always allowed regardless of rules.
+- `connect(AF_UNSPEC)` (TCP disconnect) is always allowed regardless of rules.
+- **UDP autobind:** if both UDP bind and connect/send are handled, sending from
+  an unbound UDP socket assigns an ephemeral local port. That requires
+  `"bind"` on port 0 (or a prior `bind()` to an allowed port). A `"connect"`
+  rule alone is not enough for typical DNS clients.
+- Explicit `"proto": "udp"` / `"any"` rules **error** on kernels older than
+  ABI 10 / Linux 7.2 (not silently dropped).
+- SCTP and other non-TCP/UDP protocols are not restricted by Landlock.
 
 ### Example
 
 ```json
 {
   "net": [
-    { "port": 443, "access": "connect", "comment": "HTTPS" },
-    { "port": 80, "access": "connect", "comment": "HTTP" },
-    { "port": 53, "access": "connect", "comment": "DNS" },
-    { "port": 8080, "access": "bind", "comment": "local dev server" },
-    { "port": 0, "access": "bind", "comment": "ephemeral ports" }
+    { "port": 443, "access": "connect", "comment": "HTTPS over TCP (ABI 4+, Linux 6.7+)" },
+    { "port": 80, "access": "connect", "comment": "HTTP over TCP (ABI 4+, Linux 6.7+)" },
+    { "port": 53, "access": "connect", "proto": "any", "comment": "DNS over TCP+UDP (ABI 10+, Linux 7.2+)" },
+    { "port": 0, "access": "bind", "proto": "udp", "comment": "UDP autobind (ABI 10+, Linux 7.2+)" },
+    { "port": 8080, "access": "bind", "comment": "local TCP server (ABI 4+, Linux 6.7+)" },
+    { "port": 0, "access": "bind", "comment": "TCP ephemeral ports (ABI 4+, Linux 6.7+)" }
   ]
 }
 ```
+
+Because this example contains explicit UDP rules, the complete policy requires
+ABI 10+ (Linux 7.2+). For ABI 4–9, omit the UDP autobind rule and make the port
+53 rule TCP-only; UDP is unrestricted on those kernels.
 
 ---
 
@@ -459,8 +500,9 @@ For full UNIX socket control, combine both mechanisms:
     { "path": "/run/dbus/system_bus_socket", "access": "u", "comment": "D-Bus access" }
   ],
   "net": [
-    { "port": 443, "access": "connect", "comment": "HTTPS (crates.io)" },
-    { "port": 53, "access": "connect", "comment": "DNS resolution" }
+    { "port": 443, "access": "connect", "comment": "HTTPS over TCP (ABI 4+, Linux 6.7+)" },
+    { "port": 53, "access": "connect", "proto": "any", "comment": "DNS over TCP+UDP (ABI 10+, Linux 7.2+)" },
+    { "port": 0, "access": "bind", "proto": "udp", "comment": "UDP autobind for DNS (ABI 10+, Linux 7.2+)" }
   ],
   "ipc": {
     "abstract_unix": "deny",
@@ -468,6 +510,8 @@ For full UNIX socket control, combine both mechanisms:
   }
 }
 ```
+
+The explicit UDP rules make this full example require ABI 10+ (Linux 7.2+).
 
 ---
 
@@ -500,10 +544,17 @@ How policy fields map to Landlock primitives when enforced on Linux:
 
 ### Network rules
 
-| Access | Landlock right |
-|--------|----------------|
-| `"connect"` | `ACCESS_NET_CONNECT_TCP` |
-| `"bind"` | `ACCESS_NET_BIND_TCP` |
+| Access | `proto` | Landlock right |
+|--------|---------|----------------|
+| `"connect"` | `"tcp"` (default) | `ACCESS_NET_CONNECT_TCP` |
+| `"bind"` | `"tcp"` (default) | `ACCESS_NET_BIND_TCP` |
+| `"connect"` | `"udp"` | `ACCESS_NET_CONNECT_SEND_UDP` (V10+) |
+| `"bind"` | `"udp"` | `ACCESS_NET_BIND_UDP` (V10+) |
+| `"connect"` | `"any"` | `ACCESS_NET_CONNECT_TCP` + `ACCESS_NET_CONNECT_SEND_UDP` (V10+) |
+| `"bind"` | `"any"` | `ACCESS_NET_BIND_TCP` + `ACCESS_NET_BIND_UDP` (V10+) |
+
+UDP `BIND_UDP` / `CONNECT_SEND_UDP` are handled whenever net is restricted on
+ABI 10+ (Linux 7.2+), so unspecified UDP is denied by default.
 
 ### IPC rules
 
@@ -518,6 +569,10 @@ The enforcement tool always declares all supported access rights as handled:
 `EXECUTE`, `WRITE_FILE`, `READ_FILE`, `READ_DIR`, `REMOVE_DIR`, `REMOVE_FILE`,
 `MAKE_CHAR`, `MAKE_DIR`, `MAKE_REG`, `MAKE_SOCK`, `MAKE_FIFO`, `MAKE_BLOCK`,
 `MAKE_SYM`, `REFER`, `TRUNCATE`, `IOCTL_DEV`, `RESOLVE_UNIX` (V9+).
+
+When network restriction is requested, handled net rights are `BIND_TCP` and
+`CONNECT_TCP` on ABI 4+ (Linux 6.7+), plus `BIND_UDP` and
+`CONNECT_SEND_UDP` on ABI 10+ (Linux 7.2+).
 
 Note: `MAKE_CHAR` and `MAKE_BLOCK` are always handled (denied by default) but
 not exposed through any access flag. Creating device nodes is a privileged

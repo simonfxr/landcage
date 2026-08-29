@@ -35,11 +35,17 @@ landcage --rw /project --ro /usr -- <command> [args...]
     { "path": "/home/user/project", "access": "rw" }
   ],
   "net": [
-    { "port": 443, "access": "connect" },
-    { "port": 53, "access": "connect" }
+    { "port": 443, "access": "connect", "comment": "HTTPS over TCP (ABI 4+, Linux 6.7+)" },
+    { "port": 53, "access": "connect", "proto": "any", "comment": "DNS over TCP+UDP (ABI 10+, Linux 7.2+)" },
+    { "port": 0, "access": "bind", "proto": "udp", "comment": "UDP autobind (ABI 10+, Linux 7.2+)" }
   ]
 }
 ```
+
+The complete example requires **Landlock ABI 10+ / Linux 7.2+** because it
+explicitly allows UDP. On ABI 4–9 (Linux 6.7–7.1), omit the UDP autobind rule
+and use the default TCP protocol for port 53; UDP remains unrestricted because
+those kernels cannot mediate it.
 
 ```
 $ landcage -p policy.json -- curl -o /tmp/out https://example.com
@@ -68,7 +74,19 @@ See [LANDLOCK_SANDBOX_POLICY.md](LANDLOCK_SANDBOX_POLICY.md) for the full specif
 
 **Additional rule fields:** `refer` (cross-dir rename), `ioctl_dev` (device ioctls), `ignore_missing`, `create_dir`
 
-**Network:** `"connect"`, `"bind"`, or `"connect+bind"` per TCP port; `"net": "allow"` to skip network restriction; or `"net": "deny"` to block all network access
+**Network:** `"connect"`, `"bind"`, or `"connect+bind"` per port; `"proto": "tcp"` (default), `"udp"`, or `"any"`. `"net": "allow"` skips network restriction; `"net": "deny"` blocks TCP on ABI 4+ and UDP on ABI 10+. UDP connect from an unbound socket also needs `"bind"` on port 0.
+
+| Network option | Minimum Landlock ABI | Minimum Linux | Behavior |
+|----------------|----------------------|---------------|----------|
+| `"net": "allow"` | 1 | 5.13 | No network restriction requested |
+| `"net": "deny"` | 4 / 10 | 6.7 / 7.2 | Denies TCP from ABI 4; TCP and UDP from ABI 10 |
+| `"proto": "tcp"` or omitted | 4 | 6.7 | TCP bind/connect |
+| `"proto": "udp"` | 10 | 7.2 | UDP bind/connect/send |
+| `"proto": "any"` | 10 | 7.2 | Both TCP and UDP rights |
+
+`"proto": "any"` requires ABI 10 because it includes UDP. Explicit UDP/`any`
+rules fail closed on older kernels rather than being silently dropped. Before
+ABI 4 / Linux 6.7, Landlock cannot restrict network access.
 
 **IPC:** `"deny"` (hard), `"allow"` (explicit), or omit for best-effort deny
 
@@ -105,22 +123,27 @@ set `ignore_missing: true`. These can be combined with `-p` or used standalone.
 
 - [Policy Specification](LANDLOCK_SANDBOX_POLICY.md) — JSON policy schema (filesystem, network, IPC, namespaces, env)
 - [Template Reference](POLICY_TEMPLATES.md) — Jinja-style template language for `.json.j2` policies
+- [Landlock API Reference](LANDLOCK.md) — kernel ABI, including Linux 7.2 / ABI 10
 
 ## Requirements
 
-- Linux kernel 5.13+ (Landlock V1) — more features with newer kernels
+- Linux kernel 5.13+ (Landlock V1) — more features with newer kernels (ABI 10 on Linux 7.2: UDP bind/connect/send and quiet audit rules)
 - Landlock enabled at boot (`CONFIG_SECURITY_LANDLOCK=y`)
 
 ## Kernel Compatibility
 
-Policies are portable across kernel versions. ABI-gated filesystem flags
+Filesystem policy rules are portable across kernel versions. ABI-gated filesystem flags
 (`u`, `refer`, `ioctl_dev`, and `truncate` implied by `w`) are **silently
 dropped** on kernels that don't support them, with a warning on stderr.
 This lets you write one policy that works on both older and newer kernels.
 
-Network rules and IPC `"deny"` are **not** downgraded — they will error
-if the kernel is too old, since silently skipping them would compromise
-the sandbox.
+Per-port network rules and IPC `"deny"` are **not** downgraded — they error if
+the kernel is too old, since silently skipping them would compromise the
+sandbox. TCP rules require ABI 4 / Linux 6.7; explicit
+`"proto": "udp"` / `"any"` rules require ABI 10 / Linux 7.2.
+On ABI 4–9, net restriction is TCP-only and UDP stays unrestricted (with
+a warning). `"net": "deny"` is best effort across ABI levels as detailed in
+the table above.
 
 ## How It Works
 

@@ -159,10 +159,11 @@ type FSRule struct {
 	Comment       string `json:"comment,omitempty"`
 }
 
-// NetRule defines access to a TCP port.
+// NetRule defines access to a TCP and/or UDP port.
 type NetRule struct {
 	Port    uint16 `json:"port"`
 	Access  string `json:"access"`
+	Proto   string `json:"proto,omitempty"` // "tcp" (default), "udp", or "any"
 	Comment string `json:"comment,omitempty"`
 }
 
@@ -271,6 +272,13 @@ var validNetAccess = map[string]bool{
 	"connect+bind": true,
 }
 
+var validNetProto = map[string]bool{
+	"":    true,
+	"tcp": true,
+	"udp": true,
+	"any": true,
+}
+
 func (r *NetRule) validate() error {
 	if r.Access == "" {
 		return fmt.Errorf("access is required")
@@ -278,7 +286,34 @@ func (r *NetRule) validate() error {
 	if !validNetAccess[r.Access] {
 		return fmt.Errorf("invalid access %q (valid: connect, bind, connect+bind)", r.Access)
 	}
+	if !validNetProto[r.Proto] {
+		return fmt.Errorf("invalid proto %q (valid: tcp, udp, any)", r.Proto)
+	}
 	return nil
+}
+
+// protoName returns the canonical protocol set for a rule. Omitted proto is TCP.
+func (r *NetRule) protoName() string {
+	switch r.Proto {
+	case "", "tcp":
+		return "tcp"
+	case "udp":
+		return "udp"
+	case "any":
+		return "any"
+	default:
+		return r.Proto
+	}
+}
+
+func (r *NetRule) usesTCP() bool {
+	p := r.protoName()
+	return p == "tcp" || p == "any"
+}
+
+func (r *NetRule) usesUDP() bool {
+	p := r.protoName()
+	return p == "udp" || p == "any"
 }
 
 var validIPCValues = map[string]bool{

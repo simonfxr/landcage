@@ -40,6 +40,10 @@ func FeaturesForABI(abi int) LandlockFeatures {
 // SupportsNet reports whether the kernel can restrict TCP bind/connect.
 func (f LandlockFeatures) SupportsNet() bool { return f.ABI >= 4 }
 
+// SupportsUDP reports whether the kernel can restrict UDP bind, connect,
+// and send-to-port (ABI 10+).
+func (f LandlockFeatures) SupportsUDP() bool { return f.ABI >= 10 }
+
 // SupportsScoped reports whether the kernel can restrict IPC scopes
 // (abstract UNIX sockets and signals).
 func (f LandlockFeatures) SupportsScoped() bool { return f.ABI >= 6 }
@@ -90,10 +94,15 @@ func (f LandlockFeatures) MaxFSAccess() ll.AccessFSSet {
 	}
 }
 
-// MaxNetAccess returns the full AccessNetSet (TCP bind + connect).
-// Network access rights have not grown since their introduction at ABI 4.
+// MaxNetAccess returns the AccessNetSet landcage handles when net is restricted.
+// TCP bind/connect are always included (ABI 4+). UDP bind/connect-send are
+// included on ABI 10+ so unspecified UDP is denied by default, matching TCP.
 func (f LandlockFeatures) MaxNetAccess() ll.AccessNetSet {
-	return ll.AccessNetSet((1 << 2) - 1)
+	access := ll.AccessNetSet(llsys.AccessNetBindTCP | llsys.AccessNetConnectTCP)
+	if f.SupportsUDP() {
+		access |= ll.AccessNetSet(llsys.AccessNetBindUDP | llsys.AccessNetConnectSendUDP)
+	}
+	return access
 }
 
 // ---- Validation ----
@@ -142,8 +151,13 @@ func (f LandlockFeatures) ValidateNet(net *NetConfig) error {
 	if net == nil || net.Allow || len(net.Rules) == 0 {
 		return nil
 	}
+	for i, r := range net.Rules {
+		if r.usesUDP() && !f.SupportsUDP() {
+			return fmt.Errorf("net rule %d: udp requires Landlock ABI >= 10 (Linux >= 7.2; kernel has ABI %d)", i, f.ABI)
+		}
+	}
 	if !f.SupportsNet() {
-		return fmt.Errorf("network rules require Landlock ABI >= 4 (kernel has ABI %d)", f.ABI)
+		return fmt.Errorf("network rules require Landlock ABI >= 4 (Linux >= 6.7; kernel has ABI %d)", f.ABI)
 	}
 	return nil
 }
@@ -200,7 +214,11 @@ func (f LandlockFeatures) String() string {
 	parts = append(parts, "fs="+strings.Join(fsFlags, "+"))
 
 	if f.SupportsNet() {
-		parts = append(parts, "net=yes")
+		if f.SupportsUDP() {
+			parts = append(parts, "net=tcp+udp")
+		} else {
+			parts = append(parts, "net=tcp")
+		}
 	} else {
 		parts = append(parts, "net=no")
 	}

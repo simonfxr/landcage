@@ -195,8 +195,7 @@ func forkChild(pol *policy.Policy, cmdArgs []string) (int, bool) {
 // isNamespaceError returns true if the error indicates namespace creation
 // failed (e.g. nested sandbox, kernel limits).
 func isNamespaceError(err error) bool {
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
+	if errno, ok := errors.AsType[syscall.Errno](err); ok {
 		switch errno {
 		case syscall.EPERM, syscall.ENOSPC, syscall.EUSERS, syscall.EINVAL:
 			return true

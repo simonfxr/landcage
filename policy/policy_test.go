@@ -283,6 +283,8 @@ func TestParseErrors(t *testing.T) {
 		{"missing access", `{"name": "x", "fs": [{"path": "/"}]}`},
 		{"invalid access char", `{"name": "x", "fs": [{"path": "/", "access": "z"}]}`},
 		{"invalid net access", `{"name": "x", "net": [{"port": 80, "access": "foo"}]}`},
+		{"invalid net proto", `{"name": "x", "net": [{"port": 80, "access": "connect", "proto": "sctp"}]}`},
+		{"old tcp+udp proto", `{"name": "x", "net": [{"port": 80, "access": "connect", "proto": "tcp+udp"}]}`},
 		{"invalid ipc value", `{"name": "x", "ipc": {"signal": "maybe"}}`},
 		{"create_dir + ignore_missing", `{"name": "x", "fs": [{"path": "/x", "access": "r", "create_dir": "0700", "ignore_missing": true}]}`},
 		{"bad create_dir mode", `{"name": "x", "fs": [{"path": "/x", "access": "r", "create_dir": "9999"}]}`},
@@ -586,14 +588,20 @@ func TestResolveScopesGranular(t *testing.T) {
 }
 
 func TestDryRunNetOutput(t *testing.T) {
+	feat, err := DetectFeatures()
+	if err != nil {
+		feat = LandlockFeatures{ABI: 0}
+	}
 	tests := []struct {
 		name string
 		net  NetConfig
 		want string
 	}{
-		{"deny", NetConfig{}, "Network: deny (all TCP blocked)"},
+		{"deny", NetConfig{}, "Network: deny (" + netDenySummary(feat)},
 		{"allow", NetConfig{Allow: true}, "Network: allow (unrestricted)"},
-		{"rules", NetConfig{Rules: []NetRule{{Port: 443, Access: "connect"}}}, "port 443"},
+		{"rules", NetConfig{Rules: []NetRule{{Port: 443, Access: "connect"}}}, "port 443/tcp"},
+		{"udp", NetConfig{Rules: []NetRule{{Port: 53, Access: "connect", Proto: "udp"}}}, "port 53/udp"},
+		{"both", NetConfig{Rules: []NetRule{{Port: 53, Access: "connect", Proto: "any"}}}, "port 53/any"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -606,6 +614,22 @@ func TestDryRunNetOutput(t *testing.T) {
 				t.Errorf("expected %q in output:\n%s", tt.want, buf.String())
 			}
 		})
+	}
+}
+
+func TestNetDenySummary(t *testing.T) {
+	tests := []struct {
+		abi  int
+		want string
+	}{
+		{3, "not enforced; TCP and UDP unrestricted"},
+		{4, "all TCP blocked; UDP unrestricted"},
+		{10, "all TCP and UDP blocked"},
+	}
+	for _, tt := range tests {
+		if got := netDenySummary(FeaturesForABI(tt.abi)); got != tt.want {
+			t.Errorf("ABI %d: netDenySummary() = %q, want %q", tt.abi, got, tt.want)
+		}
 	}
 }
 
@@ -633,5 +657,108 @@ func TestDryRunEnvOutput(t *testing.T) {
 	}
 	if !strings.Contains(out, "PATH_VAR:") && !strings.Contains(out, "prepend") {
 		t.Errorf("missing PATH_VAR path op output in:\n%s", out)
+	}
+}
+
+func TestABI10UDPDetection(t *testing.T) {
+	if FeaturesForABI(9).SupportsUDP() {
+		t.Error("ABI 9 should not report UDP support")
+	}
+	if !FeaturesForABI(10).SupportsUDP() {
+		t.Error("ABI 10 should report UDP support")
+	}
+
+	got9 := FeaturesForABI(9).MaxNetAccess()
+	want9 := uint64(llsys.AccessNetBindTCP | llsys.AccessNetConnectTCP)
+	if uint64(got9) != want9 {
+		t.Errorf("ABI 9 MaxNetAccess = %d, want TCP bits %d", got9, want9)
+	}
+
+	got10 := FeaturesForABI(10).MaxNetAccess()
+	want10 := uint64(llsys.AccessNetBindTCP | llsys.AccessNetConnectTCP | llsys.AccessNetBindUDP | llsys.AccessNetConnectSendUDP)
+	if uint64(got10) != want10 {
+		t.Errorf("ABI 10 MaxNetAccess = %d, want TCP+UDP bits %d", got10, want10)
+	}
+}
+
+func TestValidateNetUDP(t *testing.T) {
+	udp := &NetConfig{Rules: []NetRule{{Port: 53, Access: "connect", Proto: "udp"}}}
+	if err := FeaturesForABI(3).ValidateNet(udp); err == nil || !strings.Contains(err.Error(), "ABI >= 10") {
+		t.Fatalf("expected ABI 10 error for udp rules on ABI 3, got %v", err)
+	}
+	if err := FeaturesForABI(9).ValidateNet(udp); err == nil {
+		t.Fatal("expected error for udp rules on ABI 9")
+	}
+	if err := FeaturesForABI(10).ValidateNet(udp); err != nil {
+		t.Fatal(err)
+	}
+
+	both := &NetConfig{Rules: []NetRule{{Port: 53, Access: "connect", Proto: "any"}}}
+	if err := FeaturesForABI(9).ValidateNet(both); err == nil {
+		t.Fatal("expected error for any-proto rules on ABI 9")
+	}
+
+	tcp := &NetConfig{Rules: []NetRule{{Port: 443, Access: "connect"}}}
+	if err := FeaturesForABI(4).ValidateNet(tcp); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNetRuleProto(t *testing.T) {
+	tcp := &NetRule{Port: 443, Access: "connect"}
+	if !tcp.usesTCP() || tcp.usesUDP() || tcp.protoName() != "tcp" {
+		t.Errorf("omitted proto: tcp=%v udp=%v name=%s", tcp.usesTCP(), tcp.usesUDP(), tcp.protoName())
+	}
+	udp := &NetRule{Port: 53, Access: "connect", Proto: "udp"}
+	if udp.usesTCP() || !udp.usesUDP() {
+		t.Errorf("udp proto: tcp=%v udp=%v", udp.usesTCP(), udp.usesUDP())
+	}
+	both := &NetRule{Port: 53, Access: "connect", Proto: "any"}
+	if !both.usesTCP() || !both.usesUDP() || both.protoName() != "any" {
+		t.Errorf("any proto: tcp=%v udp=%v name=%s", both.usesTCP(), both.usesUDP(), both.protoName())
+	}
+}
+
+func TestParseNetProto(t *testing.T) {
+	p, err := Parse([]byte(`{"name":"x","net":[{"port":53,"access":"connect","proto":"udp"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Net.Rules) != 1 || p.Net.Rules[0].Proto != "udp" {
+		t.Fatalf("got %+v", p.Net.Rules)
+	}
+
+	p, err = Parse([]byte(`{"name":"x","net":[{"port":53,"access":"connect","proto":"any"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Net.Rules[0].Proto != "any" || !p.Net.Rules[0].usesTCP() || !p.Net.Rules[0].usesUDP() {
+		t.Fatalf("any proto: %+v", p.Net.Rules[0])
+	}
+}
+
+func TestFeaturesStringUDP(t *testing.T) {
+	s := FeaturesForABI(10).String()
+	if !strings.Contains(s, "net=tcp+udp") {
+		t.Errorf("ABI 10 String() = %s, want net=tcp+udp", s)
+	}
+	s9 := FeaturesForABI(9).String()
+	if !strings.Contains(s9, "net=tcp") || strings.Contains(s9, "udp") {
+		t.Errorf("ABI 9 String() = %s, want net=tcp without udp", s9)
+	}
+}
+
+func TestBuildNetRules(t *testing.T) {
+	tcp := buildNetRules(&NetRule{Port: 443, Access: "connect"})
+	if len(tcp) != 1 {
+		t.Errorf("tcp connect: got %d rules, want 1", len(tcp))
+	}
+	udp := buildNetRules(&NetRule{Port: 53, Access: "connect", Proto: "udp"})
+	if len(udp) != 1 {
+		t.Errorf("udp connect: got %d rules, want 1", len(udp))
+	}
+	both := buildNetRules(&NetRule{Port: 53, Access: "connect+bind", Proto: "any"})
+	if len(both) != 4 {
+		t.Errorf("any connect+bind: got %d rules, want 4", len(both))
 	}
 }
