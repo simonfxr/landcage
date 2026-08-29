@@ -1,6 +1,50 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"strings"
+	"testing"
+
+	"github.com/alexflint/go-arg"
+)
+
+func TestCLIRequiresDashBeforeCommand(t *testing.T) {
+	var a args
+	p, err := arg.NewParser(arg.Config{}, &a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Parse([]string{"--ro", "/", "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := setCommandArgs(&a, nil); err == nil {
+		t.Fatal("expected command without -- to be rejected by CLI validation")
+	}
+
+	before, command := splitAtDash([]string{"--ro", "/", "--", "true", "--help"})
+	a = args{}
+	p, err = arg.NewParser(arg.Config{}, &a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Parse(before); err != nil {
+		t.Fatal(err)
+	}
+	if err := setCommandArgs(&a, command); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.Cmd) != 2 || a.Cmd[0] != "true" || a.Cmd[1] != "--help" {
+		t.Fatalf("unexpected command: %#v", a.Cmd)
+	}
+}
+
+func TestPrintKernelFeatures(t *testing.T) {
+	var out bytes.Buffer
+	printKernelFeatures(&out)
+	if !strings.HasPrefix(out.String(), "Kernel features: ") {
+		t.Fatalf("unexpected output: %q", out.String())
+	}
+}
 
 func TestParseKeyValueFlags(t *testing.T) {
 	got, err := parseKeyValueFlags([]string{"foo=bar", "empty="}, "--var")

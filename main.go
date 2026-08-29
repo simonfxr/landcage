@@ -48,7 +48,9 @@ func main() {
 
 	var a args
 	p := arg.MustParse(&a)
-	a.Cmd = cmdArgs
+	if err := setCommandArgs(&a, cmdArgs); err != nil {
+		p.Fail(err.Error())
+	}
 
 	if !a.DryRun && !a.Expand && len(a.Cmd) == 0 {
 		p.Fail("command is required (use -- to separate)")
@@ -65,11 +67,13 @@ func main() {
 
 	// Dry-run without policy: just print detected kernel features.
 	if a.DryRun && a.Policy == "" && !a.PolicyJSON && !a.PolicyStdin && len(a.RO) == 0 && len(a.RW) == 0 {
-		pol := &policy.Policy{Name: "(none)"}
-		if err := policy.DryRun(pol, os.Stdout); err != nil {
-			fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
-			os.Exit(1)
+		if len(a.TemplateVar) > 0 || len(a.OptionalTemplate) > 0 {
+			p.Fail("--var/--optional-var require a .json.j2 policy template")
 		}
+		if len(a.Cmd) > 0 {
+			p.Fail("--dry-run without a policy does not accept a command")
+		}
+		printKernelFeatures(os.Stdout)
 		return
 	}
 
@@ -87,6 +91,10 @@ func main() {
 		os.Stdout.WriteString("\n")
 		return
 	}
+	if a.DryRun {
+		runSandboxed(pol, nil, true)
+		return
+	}
 
 	// Namespace isolation: serialize policy to env, re-exec in new namespaces.
 	if pol.Unshare.Enabled() {
@@ -98,7 +106,16 @@ func main() {
 	}
 
 	// No unshare (or fallback): enforce and exec directly.
-	runSandboxed(pol, a.Cmd, a.DryRun)
+	runSandboxed(pol, a.Cmd, false)
+}
+
+func printKernelFeatures(w io.Writer) {
+	feat, err := policy.DetectFeatures()
+	if err != nil {
+		fmt.Fprintf(w, "Kernel features: unavailable (%v)\n", err)
+		return
+	}
+	fmt.Fprintf(w, "Kernel features: %s\n", feat.String())
 }
 
 // childMain is the entry point for the re-exec'd child process (PID 1 in new namespaces).
@@ -325,6 +342,14 @@ func splitAtDash(args []string) (before, after []string) {
 		}
 	}
 	return args, nil
+}
+
+func setCommandArgs(a *args, command []string) error {
+	if len(a.Cmd) > 0 {
+		return fmt.Errorf("command must follow --")
+	}
+	a.Cmd = command
+	return nil
 }
 
 func (a args) Usage() string {

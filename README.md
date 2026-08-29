@@ -19,6 +19,14 @@ landcage --policy-json-from-env -- <command> [args...]
 landcage --rw /project --ro /usr -- <command> [args...]
 ```
 
+`--dry-run` resolves and validates a policy, then prints filesystem, network,
+IPC, namespace, and environment behavior without creating directories,
+entering namespaces, applying Landlock, or running the command. A command after
+`--` is accepted for invocation compatibility but is never executed. With no
+policy source or path flags, `landcage --dry-run` only prints detected kernel
+features. A policy that requests unsupported network or hard IPC features is
+printed with diagnostics and exits nonzero, matching enforcement validation.
+
 ## Example
 
 ```json

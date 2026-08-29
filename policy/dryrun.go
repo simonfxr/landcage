@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,6 +22,13 @@ func DryRun(p *Policy, w io.Writer) error {
 		fmt.Fprintf(w, "Description: %s\n", p.Description)
 	}
 	fmt.Fprintf(w, "Kernel features: %s\n\n", feat.String())
+	if p.Unshare.Enabled() {
+		fmt.Fprintf(w, "Namespaces:\n")
+		fmt.Fprintf(w, "  user: %t\n", p.Unshare.User)
+		fmt.Fprintf(w, "  pid: %t\n", p.Unshare.PID)
+		fmt.Fprintf(w, "  cgroup: %t\n", p.Unshare.Cgroup)
+		fmt.Fprintf(w, "  mount_proc: %t\n\n", p.Unshare.MountProc)
+	}
 
 	// Filesystem rules
 	if len(p.FS) > 0 {
@@ -43,18 +51,27 @@ func DryRun(p *Policy, w io.Writer) error {
 				return fmt.Errorf("fs rule %d: %w", i, err)
 			}
 
+			// Compute warning once per rule, not per resolved path.
+			warning := ""
+			if unsupported := feat.ValidateFSAccess(&r); len(unsupported) > 0 {
+				warning = fmt.Sprintf(" [WARN: unsupported: %s]", strings.Join(unsupported, "; "))
+			}
+			if r.CreateDir != "" && len(paths) == 1 {
+				if _, err := os.Stat(paths[0]); os.IsNotExist(err) {
+					if _, err := fsAccessSet(&r, true, feat); err != nil {
+						return fmt.Errorf("fs rule %d: path %s: %w", i, paths[0], err)
+					}
+					fmt.Fprintf(w, "  [%d] %s (dir, would create mode %s) → %s%s\n", i, paths[0], r.CreateDir, fsRuleFlags(&r), warning)
+					continue
+				}
+			}
+
 			if len(paths) == 0 {
 				if r.IgnoreMissing {
 					fmt.Fprintf(w, "  [%d] SKIP (no matches): %s\n", i, r.Path)
 					continue
 				}
 				return fmt.Errorf("fs rule %d: no matches for %s", i, r.Path)
-			}
-
-			// Compute warning once per rule, not per resolved path.
-			warning := ""
-			if unsupported := feat.ValidateFSAccess(&r); len(unsupported) > 0 {
-				warning = fmt.Sprintf("  [WARN] unsupported: %s", strings.Join(unsupported, "; "))
 			}
 
 			for _, path := range paths {
@@ -71,18 +88,21 @@ func DryRun(p *Policy, w io.Writer) error {
 				if fi.IsDir() {
 					kind = "dir"
 				}
+				if r.CreateDir != "" && !fi.IsDir() {
+					return fmt.Errorf("fs rule %d: create_dir target is not a directory: %s", i, path)
+				}
+				if _, err := fsAccessSet(&r, fi.IsDir(), feat); err != nil {
+					return fmt.Errorf("fs rule %d: path %s: %w", i, path, err)
+				}
 
-				flags := r.Access
-				if r.Refer {
-					flags += " +refer"
-				}
-				if r.IoctlDev {
-					flags += " +ioctl_dev"
-				}
+				flags := fsRuleFlags(&r)
 
 				note := ""
 				if strings.ContainsRune(r.Access, 'w') && !feat.SupportsTruncate() {
 					note = fmt.Sprintf(" [note: truncate unavailable on ABI %d]", feat.ABI)
+				}
+				if r.IoctlDev && fi.Mode()&os.ModeDevice == 0 {
+					note += " [WARN: ioctl_dev has no effect on a non-device path]"
 				}
 
 				fmt.Fprintf(w, "  [%d] %s (%s) → %s%s%s\n", i, path, kind, flags, warning, note)
@@ -173,7 +193,29 @@ func DryRun(p *Policy, w io.Writer) error {
 		}
 	}
 
-	return nil
+	return dryRunCompatibilityError(p, feat)
+}
+
+func dryRunCompatibilityError(p *Policy, feat LandlockFeatures) error {
+	var errs []error
+	if err := feat.ValidateNet(&p.Net); err != nil {
+		errs = append(errs, err)
+	}
+	if err := feat.ValidateIPC(p.IPC); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func fsRuleFlags(r *FSRule) string {
+	flags := r.Access
+	if r.Refer {
+		flags += " +refer"
+	}
+	if r.IoctlDev {
+		flags += " +ioctl_dev"
+	}
+	return flags
 }
 
 func netDenySummary(feat LandlockFeatures) string {

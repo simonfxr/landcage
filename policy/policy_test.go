@@ -607,13 +607,113 @@ func TestDryRunNetOutput(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &Policy{Name: "test", Net: tt.net}
 			var buf bytes.Buffer
-			if err := DryRun(p, &buf); err != nil {
-				t.Fatal(err)
+			gotErr := DryRun(p, &buf)
+			wantErr := feat.ValidateNet(&tt.net)
+			if (gotErr != nil) != (wantErr != nil) {
+				t.Fatalf("DryRun error = %v, expected compatibility error %v", gotErr, wantErr)
 			}
 			if !strings.Contains(buf.String(), tt.want) {
 				t.Errorf("expected %q in output:\n%s", tt.want, buf.String())
 			}
 		})
+	}
+}
+
+func TestDryRunRejectsDirectoryAccessOnFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := &Policy{
+		Name: "invalid-file-access",
+		FS:   []FSRule{{Path: path, Access: "c"}},
+		Net:  NetConfig{Allow: true},
+	}
+	var out bytes.Buffer
+	err := DryRun(p, &out)
+	if err == nil || !strings.Contains(err.Error(), "invalid on files") {
+		t.Fatalf("expected contextual file access error, got %v", err)
+	}
+}
+
+func TestDryRunCompatibilityError(t *testing.T) {
+	tests := []struct {
+		name string
+		p    Policy
+		abi  int
+		want string
+	}{
+		{
+			name: "tcp before ABI 4",
+			p:    Policy{Net: NetConfig{Rules: []NetRule{{Port: 443, Access: "connect"}}}},
+			abi:  3,
+			want: "ABI >= 4",
+		},
+		{
+			name: "udp before ABI 10",
+			p:    Policy{Net: NetConfig{Rules: []NetRule{{Port: 53, Access: "connect", Proto: "udp"}}}},
+			abi:  9,
+			want: "ABI >= 10",
+		},
+		{
+			name: "hard IPC deny before ABI 6",
+			p:    Policy{Net: NetConfig{Allow: true}, IPC: &IPCConfig{Signal: "deny"}},
+			abi:  5,
+			want: "ABI >= 6",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := dryRunCompatibilityError(&tt.p, FeaturesForABI(tt.abi))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q compatibility error, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
+func TestDryRunShowsCreateDirWithoutCreatingIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "new", "directory")
+	p := &Policy{
+		Name: "create-dir",
+		FS: []FSRule{{
+			Path:      path,
+			Access:    "rwcd",
+			CreateDir: "0700",
+		}},
+		Net: NetConfig{Allow: true},
+	}
+	var out bytes.Buffer
+	if err := DryRun(p, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("dry-run created %s", path)
+	}
+	if !strings.Contains(out.String(), "would create mode 0700") {
+		t.Fatalf("missing create_dir plan in output:\n%s", out.String())
+	}
+}
+
+func TestDryRunShowsNamespaceConfiguration(t *testing.T) {
+	p := &Policy{
+		Name: "namespaces",
+		Unshare: &UnshareConfig{
+			User:      true,
+			PID:       true,
+			Cgroup:    true,
+			MountProc: true,
+		},
+		Net: NetConfig{Allow: true},
+	}
+	var out bytes.Buffer
+	if err := DryRun(p, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Namespaces:", "user: true", "pid: true", "cgroup: true", "mount_proc: true"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q in output:\n%s", want, out.String())
+		}
 	}
 }
 
