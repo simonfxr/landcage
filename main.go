@@ -14,8 +14,8 @@ import (
 	"github.com/simonfxr/landcage/policy"
 )
 
-// Internal env var used to pass the resolved policy to the re-exec'd child.
-const policyEnvKey = "_LANDCAGE_POLICY"
+// publicPolicyEnvKey is the user's own policy variable for --policy-json-from-env.
+const publicPolicyEnvKey = "LANDCAGE_POLICY_JSON"
 
 type args struct {
 	DryRun           bool     `arg:"--dry-run" help:"show resolved rules without enforcing"`
@@ -92,21 +92,43 @@ func main() {
 		return
 	}
 	if a.DryRun {
-		runSandboxed(pol, nil, true)
+		if err := policy.DryRun(pol, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
-	// Namespace isolation: serialize policy to env, re-exec in new namespaces.
+	env, err := payloadEnv(pol)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Before enforcement, and before the payload env (which may rewrite PATH).
+	bin, err := exec.LookPath(a.Cmd[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
+		os.Exit(127)
+	}
+
 	if pol.Unshare.Enabled() {
-		code, ok := forkChild(pol, a.Cmd)
+		code, ok := forkChild(pol, env, bin, a.Cmd)
 		if ok {
 			os.Exit(code)
 		}
 		fmt.Fprintf(os.Stderr, "landcage: namespace unavailable (nested sandbox?), continuing with landlock only\n")
 	}
 
-	// No unshare (or fallback): enforce and exec directly.
-	runSandboxed(pol, a.Cmd, false)
+	runSandboxed(pol, env, bin, a.Cmd)
+}
+
+// payloadEnv resolves the environment the payload must see. The re-exec'd child
+// runs with exactly this environment, plus the pipe fds in childStartup.
+func payloadEnv(pol *policy.Policy) (policy.Environ, error) {
+	env := policy.ProcessEnv()
+	delete(env, publicPolicyEnvKey)
+	return policy.ApplyEnv(pol, env)
 }
 
 func printKernelFeatures(w io.Writer) {
@@ -122,91 +144,70 @@ func printKernelFeatures(w io.Writer) {
 func childMain() {
 	runtime.LockOSThread()
 
-	// Read setup pipe fd.
-	setupFD := -1
-	if fdStr := os.Getenv(setupFDEnvKey); fdStr != "" {
-		fmt.Sscanf(fdStr, "%d", &setupFD)
-	}
-
-	// Load policy from internal env var.
-	raw := os.Getenv(policyEnvKey)
-	if raw == "" {
-		fmt.Fprintln(os.Stderr, "landcage: child: missing internal policy")
+	setupFD, err := childFD(setupFDEnvKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "landcage: child: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Clear internal env vars immediately.
-	os.Unsetenv(childEnvKey)
-	os.Unsetenv(setupFDEnvKey)
-	os.Unsetenv(policyEnvKey)
-
-	pol, err := policy.Parse([]byte(raw))
+	startupFD, err := childFD(startupFDEnvKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: child: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Perform namespace setup (mount /proc, etc.)
+	// Plumbing must never reach the payload.
+	os.Unsetenv(childEnvKey)
+	os.Unsetenv(setupFDEnvKey)
+	os.Unsetenv(startupFDEnvKey)
+
+	startup, err := readChildStartup(startupFD)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "landcage: child: %v\n", err)
+		os.Exit(1)
+	}
+
+	pol, err := policy.Parse(startup.Policy)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "landcage: child: %v\n", err)
+		os.Exit(1)
+	}
+
 	if pol.Unshare != nil && pol.Unshare.MountProc {
 		if err := mountProc(); err != nil {
-			os.Exit(1) // parent detects via pipe EOF → falls back
+			os.Exit(1) // parent sees EOF on the setup pipe and falls back
 		}
 	}
 
-	// Drop all capabilities — no longer needed after mount.
 	dropAllCaps()
 
-	// Signal parent that setup succeeded, then close the pipe.
-	if setupFD >= 0 {
-		syscall.Write(setupFD, []byte("ok"))
-		syscall.Close(setupFD)
-	}
+	syscall.Write(setupFD, []byte("ok"))
+	syscall.Close(setupFD)
 
-	// The command is passed as the remaining args after "--".
+	// The command is the args after "--".
 	_, cmdArgs := splitAtDash(os.Args[1:])
 	if len(cmdArgs) == 0 {
 		fmt.Fprintln(os.Stderr, "landcage: child: no command")
 		os.Exit(1)
 	}
 
-	runSandboxed(pol, cmdArgs, false)
+	// Already the payload env: re-applying the env rules would double PATH edits.
+	runSandboxed(pol, policy.ProcessEnv(), startup.Bin, cmdArgs)
 }
 
-// runSandboxed enforces the policy and execs the command.
-func runSandboxed(pol *policy.Policy, cmd []string, dryRun bool) {
-	// Clear user-facing policy env so the target never sees it.
-	os.Unsetenv("LANDCAGE_POLICY_JSON")
-
-	if dryRun {
-		if err := policy.DryRun(pol, os.Stdout); err != nil {
-			fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
+// runSandboxed enforces the policy and execs bin with the resolved payload env.
+func runSandboxed(pol *policy.Policy, env policy.Environ, bin string, cmd []string) {
 	if err := policy.Enforce(pol); err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 		os.Exit(1)
 	}
 
-	env, err := policy.ApplyEnv(pol, policy.ProcessEnv())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
-		os.Exit(1)
-	}
-
-	bin, err := exec.LookPath(cmd[0])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
-		os.Exit(127)
-	}
+	argv := env.ToSlice()
 
 	if isChild {
-		os.Exit(reaperExec(bin, cmd, env.ToSlice()))
+		os.Exit(reaperExec(bin, cmd, argv))
 	}
 
-	if err := syscall.Exec(bin, cmd, env.ToSlice()); err != nil {
+	if err := syscall.Exec(bin, cmd, argv); err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: exec: %v\n", err)
 		os.Exit(126)
 	}
@@ -264,9 +265,9 @@ func buildPolicy(a *args, p *arg.Parser) *policy.Policy {
 		}
 		var raw []byte
 		if a.PolicyJSON {
-			s := os.Getenv("LANDCAGE_POLICY_JSON")
+			s := os.Getenv(publicPolicyEnvKey)
 			if s == "" {
-				fmt.Fprintln(os.Stderr, "landcage: LANDCAGE_POLICY_JSON environment variable is not set")
+				fmt.Fprintf(os.Stderr, "landcage: %s environment variable is not set\n", publicPolicyEnvKey)
 				os.Exit(1)
 			}
 			raw = []byte(s)

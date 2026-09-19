@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -14,16 +15,61 @@ import (
 	"github.com/simonfxr/landcage/policy"
 )
 
-const childEnvKey = "_LANDCAGE_CHILD"
-
-// Env var holding the fd number of the setup-status pipe in the child.
-const setupFDEnvKey = "_LANDCAGE_SETUP_FD"
+const (
+	childEnvKey     = "_LANDCAGE_CHILD"
+	setupFDEnvKey   = "_LANDCAGE_SETUP_FD"
+	startupFDEnvKey = "_LANDCAGE_STARTUP_FD"
+)
 
 // CAP_SYS_ADMIN capability number (needed for mount in user namespace).
 const capSysAdmin = 21
 
 // isChild is true in the re-exec'd child (PID 1 in new PID namespace / reaper).
 var isChild = os.Getenv(childEnvKey) == "1"
+
+// childStartup is the payload the parent sends the re-exec'd child over a pipe.
+// The policy and resolved executable must not travel through the environment:
+// /proc/1/environ keeps the exec-time block after unsetenv(3) and the payload
+// can read it. The fds passed to childFD carry no policy data, so env is fine.
+type childStartup struct {
+	Policy json.RawMessage `json:"policy"`
+	Bin    string          `json:"bin"`
+}
+
+// childFD returns one of the pipe fds the parent passed to the child, rejected
+// below fd 3 where ExtraFiles land.
+func childFD(key string) (int, error) {
+	fd, err := strconv.Atoi(os.Getenv(key))
+	if err != nil || fd < 3 {
+		return 0, fmt.Errorf("missing or invalid %s", key)
+	}
+	return fd, nil
+}
+
+// readChildStartup reads the startup payload and closes the pipe, so the
+// payload cannot inherit it.
+func readChildStartup(fd int) (childStartup, error) {
+	var startup childStartup
+	f := os.NewFile(uintptr(fd), "landcage-startup")
+	if f == nil {
+		return startup, fmt.Errorf("invalid startup pipe fd %d", fd)
+	}
+	raw, err := io.ReadAll(f)
+	f.Close()
+	if err != nil {
+		return startup, fmt.Errorf("reading startup payload: %w", err)
+	}
+	if len(raw) == 0 {
+		return startup, errors.New("missing startup payload")
+	}
+	if err := json.Unmarshal(raw, &startup); err != nil {
+		return startup, fmt.Errorf("decoding startup payload: %w", err)
+	}
+	if len(startup.Policy) == 0 {
+		return startup, errors.New("missing policy in startup payload")
+	}
+	return startup, nil
+}
 
 // mountProc remounts /proc in the new mount+PID namespace.
 func mountProc() error {
@@ -63,82 +109,89 @@ func dropAllCaps() {
 	)
 }
 
-// forkChild clones a child into new namespaces and waits for it.
-// The fully-resolved policy is serialized into an internal env var;
-// the child only receives "-- cmd args..." as arguments.
+// namespaceAttrs builds the clone attributes for the re-exec'd child; with User,
+// uid/gid map to themselves and CAP_SYS_ADMIN is ambient for mountProc.
+func namespaceAttrs(cfg *policy.UnshareConfig) *syscall.SysProcAttr {
+	attrs := &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	if cfg == nil {
+		return attrs
+	}
+	if cfg.User {
+		attrs.Cloneflags |= syscall.CLONE_NEWUSER
+		uid, gid := os.Geteuid(), os.Getegid()
+		attrs.UidMappings = []syscall.SysProcIDMap{{ContainerID: uid, HostID: uid, Size: 1}}
+		attrs.GidMappings = []syscall.SysProcIDMap{{ContainerID: gid, HostID: gid, Size: 1}}
+		attrs.AmbientCaps = []uintptr{capSysAdmin}
+	}
+	if cfg.PID {
+		attrs.Cloneflags |= syscall.CLONE_NEWPID
+	}
+	if cfg.Cgroup {
+		attrs.Cloneflags |= syscall.CLONE_NEWCGROUP
+	}
+	if cfg.MountProc {
+		attrs.Cloneflags |= syscall.CLONE_NEWNS
+	}
+	return attrs
+}
+
+// forkChild clones a child into new namespaces and waits for it. The child runs
+// with the payload's environment and gets the policy and executable over the
+// startup pipe.
 // Returns (exit code, true) on success, or (0, false) if namespace creation failed.
-func forkChild(pol *policy.Policy, cmdArgs []string) (int, bool) {
+func forkChild(pol *policy.Policy, env policy.Environ, bin string, cmdArgs []string) (int, bool) {
 	self, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: resolving self: %v\n", err)
 		return 1, true
 	}
 
-	// Serialize the resolved policy for the child.
 	policyJSON, err := json.Marshal(pol)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: serializing policy: %v\n", err)
 		return 1, true
 	}
+	startup, err := json.Marshal(childStartup{Policy: policyJSON, Bin: bin})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "landcage: serializing startup: %v\n", err)
+		return 1, true
+	}
 
-	// Pipe for child to signal setup status. Child writes "ok" after successful
-	// mount/setup, then closes. If child dies during setup, read returns EOF → fallback.
+	// Setup-status pipe: the child writes "ok" once its namespaces are ready.
+	// EOF instead means setup failed and the caller falls back to landlock only.
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: pipe: %v\n", err)
 		return 1, true
 	}
+	startupR, startupW, err := os.Pipe()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "landcage: pipe: %v\n", err)
+		pr.Close()
+		pw.Close()
+		return 1, true
+	}
 
-	// Build ExtraFiles: all inherited fds + the setup pipe write end.
+	// ExtraFiles[i] becomes fd i+3 in the child.
 	extraFiles := extraFilesForInherit()
-	setupFDIndex := len(extraFiles) // position in ExtraFiles
+	setupFDIndex := len(extraFiles)
 	extraFiles = append(extraFiles, pw)
-	setupFD := setupFDIndex + 3 // fd number in child (ExtraFiles[i] → fd i+3)
+	setupFD := setupFDIndex + 3
+	startupFDIndex := len(extraFiles)
+	extraFiles = append(extraFiles, startupR)
+	startupFD := startupFDIndex + 3
 
 	child := exec.Command(self, append([]string{"--"}, cmdArgs...)...)
 	child.Stdin = os.Stdin
 	child.Stdout = os.Stdout
 	child.Stderr = os.Stderr
-	child.Env = append(os.Environ(),
+	child.Env = append(env.ToSlice(),
 		childEnvKey+"=1",
 		fmt.Sprintf("%s=%d", setupFDEnvKey, setupFD),
-		policyEnvKey+"="+string(policyJSON),
+		fmt.Sprintf("%s=%d", startupFDEnvKey, startupFD),
 	)
 	child.ExtraFiles = extraFiles
-
-	var cloneFlags uintptr
-	cfg := pol.Unshare
-	if cfg.User {
-		cloneFlags |= syscall.CLONE_NEWUSER
-	}
-	if cfg.PID {
-		cloneFlags |= syscall.CLONE_NEWPID
-	}
-	if cfg.Cgroup {
-		cloneFlags |= syscall.CLONE_NEWCGROUP
-	}
-	if cfg.MountProc {
-		cloneFlags |= syscall.CLONE_NEWNS
-	}
-
-	child.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: cloneFlags,
-		Pdeathsig:  syscall.SIGKILL,
-	}
-
-	if cfg.User {
-		uid := os.Geteuid()
-		gid := os.Getegid()
-		// Map current uid/gid to itself inside (like --map-current-user).
-		// AmbientCaps grants CAP_SYS_ADMIN so the child can mount /proc after exec.
-		child.SysProcAttr.UidMappings = []syscall.SysProcIDMap{
-			{ContainerID: uid, HostID: uid, Size: 1},
-		}
-		child.SysProcAttr.GidMappings = []syscall.SysProcIDMap{
-			{ContainerID: gid, HostID: gid, Size: 1},
-		}
-		child.SysProcAttr.AmbientCaps = []uintptr{capSysAdmin}
-	}
+	child.SysProcAttr = namespaceAttrs(pol.Unshare)
 
 	// Subscribe to signals BEFORE Start to avoid losing a fast SIGTERM.
 	sigCh := make(chan os.Signal, 16)
@@ -151,6 +204,8 @@ func forkChild(pol *policy.Policy, cmdArgs []string) (int, bool) {
 		signal.Stop(sigCh)
 		pr.Close()
 		pw.Close()
+		startupR.Close()
+		startupW.Close()
 		closeExtraFiles(extraFiles[:setupFDIndex])
 		if isNamespaceError(err) {
 			return 0, false
@@ -158,8 +213,13 @@ func forkChild(pol *policy.Policy, cmdArgs []string) (int, bool) {
 		fmt.Fprintf(os.Stderr, "landcage: namespace exec: %v\n", err)
 		return 1, true
 	}
-	pw.Close() // parent doesn't write
+	pw.Close()
+	startupR.Close()
 	closeExtraFiles(extraFiles[:setupFDIndex])
+
+	// A failed write means the child died during setup; the pipe below reports it.
+	_, _ = startupW.Write(startup)
+	startupW.Close()
 
 	// Read setup status from child. "ok" = success. EOF = setup failed.
 	var buf [2]byte
