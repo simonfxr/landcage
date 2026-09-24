@@ -26,7 +26,7 @@
               (pkgs.lib.fileset.fileFilter (f: f.hasExt "go") ./.)
             ];
           };
-          vendorHash = "sha256-ydVIhe2Me5u2pgV0Imn3TM58rr2BiAF7uhk6YEgtaxs=";
+          vendorHash = "sha256-dUuGOxCc27FjnGPJHI5IJPNGtt0fiN1xWa5kcfERM0Y=";
           env.CGO_ENABLED = "0";
           ldflags = [
             "-s"
