@@ -25,6 +25,9 @@ const (
 // CAP_SYS_ADMIN capability number (needed for mount in user namespace).
 const capSysAdmin = 21
 
+// CAP_NET_ADMIN is needed to bring up lo in a private network namespace.
+const capNetAdmin = 12
+
 // isChild is true in the re-exec'd child (PID 1 in new PID namespace / reaper).
 var isChild = os.Getenv(childEnvKey) == "1"
 
@@ -35,6 +38,7 @@ var isChild = os.Getenv(childEnvKey) == "1"
 type childStartup struct {
 	Policy json.RawMessage `json:"policy"`
 	Bin    string          `json:"bin"`
+	Net    networkMode     `json:"net,omitempty"`
 }
 
 // childFD returns one of the pipe fds the parent passed to the child, rejected
@@ -117,17 +121,24 @@ func dropAllCaps() error {
 
 // namespaceAttrs builds the clone attributes for the re-exec'd child; with User,
 // uid/gid map to themselves and CAP_SYS_ADMIN is ambient for mountProc.
-func namespaceAttrs(cfg *policy.UnshareConfig) *syscall.SysProcAttr {
+func namespaceAttrs(cfg *policy.UnshareConfig, netMode networkMode) *syscall.SysProcAttr {
 	attrs := &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	if cfg == nil {
-		return attrs
+		cfg = &policy.UnshareConfig{}
 	}
-	if cfg.User {
+	// Private networking needs a user namespace for unprivileged creation.
+	if cfg.User || netMode.private() {
 		attrs.Cloneflags |= syscall.CLONE_NEWUSER
 		uid, gid := os.Geteuid(), os.Getegid()
 		attrs.UidMappings = []syscall.SysProcIDMap{{ContainerID: uid, HostID: uid, Size: 1}}
 		attrs.GidMappings = []syscall.SysProcIDMap{{ContainerID: gid, HostID: gid, Size: 1}}
 		attrs.AmbientCaps = []uintptr{capSysAdmin}
+		if netMode == networkIsolated {
+			attrs.AmbientCaps = append(attrs.AmbientCaps, capNetAdmin)
+		}
+	}
+	if netMode.private() {
+		attrs.Cloneflags |= syscall.CLONE_NEWNET
 	}
 	if cfg.PID {
 		attrs.Cloneflags |= syscall.CLONE_NEWPID
@@ -145,7 +156,7 @@ func namespaceAttrs(cfg *policy.UnshareConfig) *syscall.SysProcAttr {
 // with the payload's environment and gets the policy and executable over the
 // startup pipe.
 // Returns (exit code, true) on success, or (0, false) if namespace creation failed.
-func forkChild(pol *policy.Policy, env policy.Environ, bin string, cmdArgs []string) (int, bool) {
+func forkChild(pol *policy.Policy, env policy.Environ, bin string, cmdArgs []string, netMode networkMode) (int, bool) {
 	self, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: resolving self: %v\n", err)
@@ -157,14 +168,14 @@ func forkChild(pol *policy.Policy, env policy.Environ, bin string, cmdArgs []str
 		fmt.Fprintf(os.Stderr, "landcage: serializing policy: %v\n", err)
 		return 1, true
 	}
-	startup, err := json.Marshal(childStartup{Policy: policyJSON, Bin: bin})
+	startup, err := json.Marshal(childStartup{Policy: policyJSON, Bin: bin, Net: netMode})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: serializing startup: %v\n", err)
 		return 1, true
 	}
 
 	// Setup-status pipe: the child writes "ok" once its namespaces are ready.
-	// EOF instead means setup failed and the caller falls back to landlock only.
+	// EOF means setup failed; the caller may fall back only with host networking.
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: pipe: %v\n", err)
@@ -197,7 +208,7 @@ func forkChild(pol *policy.Policy, env policy.Environ, bin string, cmdArgs []str
 		fmt.Sprintf("%s=%d", startupFDEnvKey, startupFD),
 	)
 	child.ExtraFiles = extraFiles
-	child.SysProcAttr = namespaceAttrs(pol.Unshare)
+	child.SysProcAttr = namespaceAttrs(pol.Unshare, netMode)
 
 	// Subscribe to signals BEFORE Start to avoid losing a fast SIGTERM.
 	sigCh := make(chan os.Signal, 16)

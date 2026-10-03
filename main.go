@@ -18,16 +18,17 @@ import (
 const publicPolicyEnvKey = "LANDCAGE_POLICY_JSON"
 
 type args struct {
-	DryRun           bool     `arg:"--dry-run" help:"show resolved rules without enforcing"`
-	Expand           bool     `arg:"--expand" help:"expand policy and output JSON to stdout (no enforcement)"`
-	RO               []string `arg:"--ro,separate" help:"additional read-only path (rx)"`
-	RW               []string `arg:"--rw,separate" help:"additional read-write path (rwxcd+refer)"`
-	Policy           string   `arg:"--policy,-p" help:"policy file (.json or .json.j2 template)"`
-	PolicyJSON       bool     `arg:"--policy-json-from-env" help:"read expanded policy JSON from LANDCAGE_POLICY_JSON env var"`
-	PolicyStdin      bool     `arg:"--policy-json-from-stdin" help:"read expanded policy JSON from stdin"`
-	TemplateVar      []string `arg:"--var,separate" help:"required template variable KEY=VALUE (.json.j2 only)"`
-	OptionalTemplate []string `arg:"--optional-var,separate" help:"optional template variable KEY=VALUE (.json.j2 only)"`
-	Cmd              []string `arg:"positional" help:"command to execute (after --)"`
+	DryRun           bool        `arg:"--dry-run" help:"show resolved rules without enforcing"`
+	Expand           bool        `arg:"--expand" help:"expand policy and output JSON to stdout (no enforcement)"`
+	RO               []string    `arg:"--ro,separate" help:"additional read-only path (rx)"`
+	RW               []string    `arg:"--rw,separate" help:"additional read-write path (rwxcd+refer)"`
+	Policy           string      `arg:"--policy,-p" help:"policy file (.json or .json.j2 template)"`
+	PolicyJSON       bool        `arg:"--policy-json-from-env" help:"read expanded policy JSON from LANDCAGE_POLICY_JSON env var"`
+	PolicyStdin      bool        `arg:"--policy-json-from-stdin" help:"read expanded policy JSON from stdin"`
+	TemplateVar      []string    `arg:"--var,separate" help:"required template variable KEY=VALUE (.json.j2 only)"`
+	OptionalTemplate []string    `arg:"--optional-var,separate" help:"optional template variable KEY=VALUE (.json.j2 only)"`
+	Net              networkMode `arg:"--net" default:"host" help:"network namespace: host, none (loopback down), or isolated (loopback up)"`
+	Cmd              []string    `arg:"positional" help:"command to execute (after --)"`
 }
 
 func (args) Description() string {
@@ -74,6 +75,7 @@ func main() {
 			p.Fail("--dry-run without a policy does not accept a command")
 		}
 		printKernelFeatures(os.Stdout)
+		printNetworkNamespace(os.Stdout, a.Net)
 		return
 	}
 
@@ -92,6 +94,7 @@ func main() {
 		return
 	}
 	if a.DryRun {
+		printNetworkNamespace(os.Stdout, a.Net)
 		if err := policy.DryRun(pol, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 			os.Exit(1)
@@ -112,10 +115,14 @@ func main() {
 		os.Exit(127)
 	}
 
-	if pol.Unshare.Enabled() {
-		code, ok := forkChild(pol, env, bin, a.Cmd)
+	if pol.Unshare.Enabled() || a.Net.private() {
+		code, ok := forkChild(pol, env, bin, a.Cmd, a.Net)
 		if ok {
 			os.Exit(code)
+		}
+		if a.Net.private() {
+			fmt.Fprintln(os.Stderr, "landcage: private network namespace setup failed; refusing host network fallback")
+			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "landcage: namespace unavailable (nested sandbox?), continuing with landlock only\n")
 	}
@@ -175,6 +182,13 @@ func childMain() {
 	if pol.Unshare != nil && pol.Unshare.MountProc {
 		if err := mountProc(); err != nil {
 			os.Exit(1) // parent sees EOF on the setup pipe and falls back
+		}
+	}
+
+	if startup.Net == networkIsolated {
+		if err := bringLoopbackUp(); err != nil {
+			fmt.Fprintf(os.Stderr, "landcage: child: %v\n", err)
+			os.Exit(1)
 		}
 	}
 

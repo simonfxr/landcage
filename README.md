@@ -23,9 +23,38 @@ landcage --rw /project --ro /usr -- <command> [args...]
 IPC, namespace, and environment behavior without creating directories,
 entering namespaces, applying Landlock, or running the command. A command after
 `--` is accepted for invocation compatibility but is never executed. With no
-policy source or path flags, `landcage --dry-run` only prints detected kernel
-features. A policy that requests unsupported network or hard IPC features is
-printed with diagnostics and exits nonzero, matching enforcement validation.
+policy source or path flags, `landcage --dry-run` prints detected kernel
+features and the selected network namespace mode. A policy that requests
+unsupported network or hard IPC features is printed with diagnostics and exits
+nonzero, matching enforcement validation.
+
+### Network namespaces
+
+`--net` selects networking independently of the policy's Landlock `net` rules:
+
+| Flag | Behavior |
+|------|----------|
+| `--net host` (default) | Use the existing network namespace |
+| `--net none` | Private network namespace; loopback remains down |
+| `--net isolated` | Private network namespace; only loopback, configured and up |
+
+Linux always creates a `lo` interface in a new network namespace; `none` leaves
+it disabled rather than removing it. `isolated` enables `127.0.0.1` (and `::1`
+when IPv6 is enabled), but cannot reach the host's loopback or external network.
+It does not create a proxy or an uplink. Landlock network rules still apply;
+allow the appropriate ports or use `"net": "allow"` for loopback communication.
+
+Private modes automatically create a user namespace and **fail closed** if
+namespace creation or setup fails. They require unprivileged user namespaces
+to be available. Existing namespace options remain in effect. This flag is
+runtime-only: `--expand` does not include it in the policy JSON.
+Inherited network sockets are not revoked, and pathname UNIX sockets remain
+subject to filesystem policy.
+
+```sh
+landcage --net none --ro / -- command
+landcage --net isolated -p policy.json -- command
+```
 
 ## Example
 

@@ -23,6 +23,17 @@ const (
 
 // TestMain re-enters this binary as the payload of the integration test below.
 func TestMain(m *testing.M) {
+	if os.Getenv(helperEnv) == "network-fail-setup" {
+		if isChild {
+			os.Exit(1) // Simulate a child failing before reporting setup success.
+		}
+		main()
+		os.Exit(0)
+	}
+	if os.Getenv(helperEnv) == "network" {
+		networkHelper()
+		os.Exit(0)
+	}
 	if os.Getenv(helperEnv) == helperSleepMode {
 		time.Sleep(5 * time.Second)
 		os.Exit(0)
