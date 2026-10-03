@@ -178,7 +178,10 @@ func childMain() {
 		}
 	}
 
-	dropAllCaps()
+	if err := dropAllCaps(); err != nil {
+		fmt.Fprintf(os.Stderr, "landcage: child: %v\n", err)
+		os.Exit(1)
+	}
 
 	syscall.Write(setupFD, []byte("ok"))
 	syscall.Close(setupFD)

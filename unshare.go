@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/simonfxr/landcage/internal/allthreads"
 	"github.com/simonfxr/landcage/policy"
 )
 
@@ -84,11 +85,12 @@ func mountProc() error {
 
 // dropAllCaps clears all capabilities (ambient, inheritable, effective, permitted)
 // on ALL threads so the target doesn't inherit caps from any Go runtime thread.
-func dropAllCaps() {
-	// Clear ambient capabilities (per-thread, but ambient is rarely on other threads).
+func dropAllCaps() error {
 	const prCapAmbient = 47
 	const prCapAmbientClearAll = 4
-	syscall.RawSyscall6(syscall.SYS_PRCTL, prCapAmbient, prCapAmbientClearAll, 0, 0, 0, 0)
+	if _, _, errno := allthreads.AllThreadsSyscall6(syscall.SYS_PRCTL, prCapAmbient, prCapAmbientClearAll, 0, 0, 0, 0); errno != 0 {
+		return fmt.Errorf("clearing ambient capabilities: %w", errno)
+	}
 
 	// Clear inheritable, effective, and permitted via capset(2) on ALL threads.
 	type capHeader struct {
@@ -102,11 +104,15 @@ func dropAllCaps() {
 	}
 	hdr := capHeader{Version: 0x20080522} // _LINUX_CAPABILITY_VERSION_3
 	data := [2]capData{}                  // all zeros = no caps
-	syscall.AllThreadsSyscall(syscall.SYS_CAPSET,
+	_, _, errno := allthreads.AllThreadsSyscall3(syscall.SYS_CAPSET,
 		uintptr(unsafe.Pointer(&hdr)),
 		uintptr(unsafe.Pointer(&data[0])),
 		0,
 	)
+	if errno != 0 {
+		return fmt.Errorf("clearing capabilities: %w", errno)
+	}
+	return nil
 }
 
 // namespaceAttrs builds the clone attributes for the re-exec'd child; with User,

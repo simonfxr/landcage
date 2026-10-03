@@ -6,6 +6,7 @@ require (
 	github.com/alexflint/go-arg v1.6.1
 	github.com/landlock-lsm/go-landlock v0.10.1
 	github.com/nikolalohinski/gonja/v2 v2.9.1
+	kernel.org/pub/linux/libs/security/libcap/psx v1.2.78
 )
 
 require (
@@ -14,5 +15,4 @@ require (
 	github.com/sirupsen/logrus v1.10.2 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
-	kernel.org/pub/linux/libs/security/libcap/psx v1.2.78 // indirect
 )
