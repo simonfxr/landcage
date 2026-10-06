@@ -177,6 +177,7 @@ are highly privileged: granting access can defeat sandbox isolation.**
 - [Policy Specification](LANDLOCK_SANDBOX_POLICY.md) — JSON policy schema (filesystem, network, IPC, namespaces, env)
 - [Template Reference](POLICY_TEMPLATES.md) — Jinja-style template language for `.json.j2` policies
 - [Landlock API Reference](LANDLOCK.md) — kernel ABI through ABI 11
+- [macOS SBPL backend](docs/osx-sbpl.md) — Seatbelt enforcement via `sandbox_init_with_parameters`
 
 ## Requirements
 

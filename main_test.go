@@ -147,6 +147,34 @@ func TestCheckNoSharedKeysRejectsOverlap(t *testing.T) {
 	}
 }
 
+func TestScrubDYLDLeavesPolicyKeys(t *testing.T) {
+	kept := "from-policy"
+	pol := &policy.Policy{Env: map[string]policy.EnvEntry{
+		"DYLD_LIBRARY_PATH": {Value: &kept},
+	}}
+	env := policy.Environ{
+		"DYLD_INSERT_LIBRARIES":      "/evil.dylib",
+		"DYLD_LIBRARY_PATH":          kept,
+		"DYLD_FRAMEWORK_PATH":        "/fw",
+		"DYLD_FALLBACK_LIBRARY_PATH": "/fb",
+		"DYLD_ROOT_PATH":             "/root",
+		"PATH":                       "/usr/bin",
+	}
+	scrubDYLD(pol, env)
+	if _, ok := env["DYLD_INSERT_LIBRARIES"]; ok {
+		t.Fatal("DYLD_INSERT_LIBRARIES was not unset")
+	}
+	if _, ok := env["DYLD_FRAMEWORK_PATH"]; ok || env["DYLD_FALLBACK_LIBRARY_PATH"] != "" || env["DYLD_ROOT_PATH"] != "" {
+		t.Fatalf("dyld vars not scrubbed: %#v", env)
+	}
+	if env["DYLD_LIBRARY_PATH"] != kept {
+		t.Fatalf("policy key = %q", env["DYLD_LIBRARY_PATH"])
+	}
+	if env["PATH"] != "/usr/bin" {
+		t.Fatalf("PATH = %q", env["PATH"])
+	}
+}
+
 func TestCheckNoSharedKeysAllowsDisjoint(t *testing.T) {
 	err := checkNoSharedKeys(
 		map[string]string{"foo": "required"},

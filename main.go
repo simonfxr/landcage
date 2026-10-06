@@ -115,18 +115,7 @@ func main() {
 		os.Exit(127)
 	}
 
-	if pol.Unshare.Enabled() || a.Net.private() {
-		code, ok := forkChild(pol, env, bin, a.Cmd, a.Net)
-		if ok {
-			os.Exit(code)
-		}
-		if a.Net.private() {
-			fmt.Fprintln(os.Stderr, "landcage: private network namespace setup failed; refusing host network fallback")
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "landcage: namespace unavailable (nested sandbox?), continuing with landlock only\n")
-	}
-
+	setupNamespaces(pol, env, bin, a.Cmd, a.Net)
 	runSandboxed(pol, env, bin, a.Cmd)
 }
 
@@ -209,25 +198,6 @@ func childMain() {
 
 	// Already the payload env: re-applying the env rules would double PATH edits.
 	runSandboxed(pol, policy.ProcessEnv(), startup.Bin, cmdArgs)
-}
-
-// runSandboxed enforces the policy and execs bin with the resolved payload env.
-func runSandboxed(pol *policy.Policy, env policy.Environ, bin string, cmd []string) {
-	if err := policy.Enforce(pol); err != nil {
-		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
-		os.Exit(1)
-	}
-
-	argv := env.ToSlice()
-
-	if isChild {
-		os.Exit(reaperExec(bin, cmd, argv))
-	}
-
-	if err := syscall.Exec(bin, cmd, argv); err != nil {
-		fmt.Fprintf(os.Stderr, "landcage: exec: %v\n", err)
-		os.Exit(126)
-	}
 }
 
 // buildPolicy resolves the policy from CLI flags. All expansion, parsing,

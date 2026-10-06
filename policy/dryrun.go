@@ -58,7 +58,7 @@ func DryRun(p *Policy, w io.Writer) error {
 			}
 			if r.CreateDir != "" && len(paths) == 1 {
 				if _, err := os.Stat(paths[0]); os.IsNotExist(err) {
-					if _, err := fsAccessSet(&r, true, feat); err != nil {
+					if err := fsRuleError(&r, true); err != nil {
 						return fmt.Errorf("fs rule %d: path %s: %w", i, paths[0], err)
 					}
 					fmt.Fprintf(w, "  [%d] %s (dir, would create mode %s) → %s%s\n", i, paths[0], r.CreateDir, fsRuleFlags(&r), warning)
@@ -91,7 +91,7 @@ func DryRun(p *Policy, w io.Writer) error {
 				if r.CreateDir != "" && !fi.IsDir() {
 					return fmt.Errorf("fs rule %d: create_dir target is not a directory: %s", i, path)
 				}
-				if _, err := fsAccessSet(&r, fi.IsDir(), feat); err != nil {
+				if err := fsRuleError(&r, fi.IsDir()); err != nil {
 					return fmt.Errorf("fs rule %d: path %s: %w", i, path, err)
 				}
 
