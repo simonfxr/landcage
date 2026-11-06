@@ -133,7 +133,7 @@ func networkHelper() {
 	if err != nil {
 		panic(err)
 	}
-	for _, line := range strings.Split(string(status), "\n") {
+	for line := range strings.SplitSeq(string(status), "\n") {
 		if strings.HasPrefix(line, "Cap") && !strings.HasPrefix(line, "CapBnd:") {
 			report.Caps = append(report.Caps, line)
 		}

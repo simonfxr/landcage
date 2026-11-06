@@ -2,11 +2,71 @@ package main
 
 import (
 	"bytes"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/alexflint/go-arg"
+	"github.com/simonfxr/landcage/policy"
 )
+
+func TestCLIRWPathRules(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(dir, "socket")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(file, link); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name, path, access string
+		refer              bool
+	}{
+		{"directory", dir, "rwxcdu", true},
+		{"file", file, "rwxu", false},
+		{"socket", socket, "rwxu", false},
+		{"device", "/dev/null", "rwxu", false},
+		{"symlink", link, "rwxu", false},
+		{"missing", filepath.Join(dir, "missing"), "rwxcdu", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := args{RW: []string{tc.path}, RO: []string{dir}}
+			p, err := arg.NewParser(arg.Config{}, &a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pol := buildPolicy(&a, p)
+			want := policy.FSRule{
+				Path: tc.path, Access: tc.access, Refer: tc.refer,
+				IoctlDev: true, IgnoreMissing: true,
+			}
+			if len(pol.FS) != 2 || pol.FS[1] != want {
+				t.Fatalf("unexpected rules: %#v; want RW %#v", pol.FS, want)
+			}
+			if ro := pol.FS[0]; ro.Access != "rx" || ro.IoctlDev || ro.Refer {
+				t.Fatalf("--ro changed: %#v", ro)
+			}
+			var out bytes.Buffer
+			if err := policy.DryRun(pol, &out); err != nil {
+				t.Fatalf("invalid generated policy: %v", err)
+			}
+			if tc.name == "directory" && strings.Contains(out.String(), "ioctl_dev has no effect") {
+				t.Fatal("directory ioctl grant incorrectly reported as ineffective")
+			}
+		})
+	}
+}
 
 func TestCLIRequiresDashBeforeCommand(t *testing.T) {
 	var a args

@@ -21,7 +21,7 @@ type args struct {
 	DryRun           bool        `arg:"--dry-run" help:"show resolved rules without enforcing"`
 	Expand           bool        `arg:"--expand" help:"expand policy and output JSON to stdout (no enforcement)"`
 	RO               []string    `arg:"--ro,separate" help:"additional read-only path (rx)"`
-	RW               []string    `arg:"--rw,separate" help:"additional read-write path (rwxcd+refer)"`
+	RW               []string    `arg:"--rw,separate" help:"additional read-write path, including UNIX sockets and device ioctls"`
 	Policy           string      `arg:"--policy,-p" help:"policy file (.json or .json.j2 template)"`
 	PolicyJSON       bool        `arg:"--policy-json-from-env" help:"read expanded policy JSON from LANDCAGE_POLICY_JSON env var"`
 	PolicyStdin      bool        `arg:"--policy-json-from-stdin" help:"read expanded policy JSON from stdin"`
@@ -318,12 +318,23 @@ func buildPolicy(a *args, p *arg.Parser) *policy.Policy {
 		})
 	}
 	for _, path := range a.RW {
-		pol.FS = append(pol.FS, policy.FSRule{
+		rule := policy.FSRule{
 			Path:          path,
-			Access:        "rwxcd",
+			Access:        "rwxcdu",
 			Refer:         true,
+			IoctlDev:      true,
 			IgnoreMissing: true,
-		})
+		}
+		// Exact file, socket, and device paths cannot carry directory-only
+		// rights. Stat follows symlinks, just as policy enforcement does.
+		fi, err := os.Stat(path)
+		if err == nil && !fi.IsDir() {
+			rule.Access = "rwxu"
+			rule.Refer = false
+		} else if err != nil && !os.IsNotExist(err) {
+			p.Fail(fmt.Sprintf("--rw %s: %v", path, err))
+		}
+		pol.FS = append(pol.FS, rule)
 	}
 
 	return pol

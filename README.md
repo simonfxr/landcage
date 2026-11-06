@@ -153,8 +153,24 @@ landcage --expand -p policy.json.j2 --var profile=dev | my-filter | \
 stdin (no template expansion).
 
 **Quick path flags:** `--ro PATH` adds a read+execute rule (like `"access": "rx"`).
-`--rw PATH` adds a full read/write/execute/create/delete+refer rule. Both
-set `ignore_missing: true`. These can be combined with `-p` or used standalone.
+`--rw PATH` adds read/write/execute, pathname UNIX socket connections (`u`),
+and device ioctls (`ioctl_dev`). Directories also get create/delete+refer,
+with all rights applying to their descendants. Exact file, socket, and device
+paths omit those directory-only rights. Both flags set `ignore_missing: true`
+and can be combined with `-p` or used standalone.
+
+For example, `--rw /var/lib/incus` allows pathname sockets under that directory;
+`--rw /var/lib/incus/unix.socket` grants only that socket. For GPU access, use
+`--rw /dev/dri` or an individual device such as `--rw /dev/dri/renderD128`
+(other drivers may require additional devices).
+
+Socket-connect restrictions require Landlock ABI 9+, and device-ioctl
+restrictions require ABI 5+; older kernels do not mediate those operations.
+These grants do not override Unix permissions, device cgroups, or an outer
+sandbox, and do not grant access to abstract UNIX sockets. When used through
+aora's `/unveil --rw`, aora must use the updated landcage binary and restart
+the sandbox to apply the new grants. **Incus and similar management sockets
+are highly privileged: granting access can defeat sandbox isolation.**
 
 ## Documentation
 

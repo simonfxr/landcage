@@ -101,7 +101,7 @@ func DryRun(p *Policy, w io.Writer) error {
 				if strings.ContainsRune(r.Access, 'w') && !feat.SupportsTruncate() {
 					note = fmt.Sprintf(" [note: truncate unavailable on ABI %d]", feat.ABI)
 				}
-				if r.IoctlDev && fi.Mode()&os.ModeDevice == 0 {
+				if r.IoctlDev && !fi.IsDir() && fi.Mode()&os.ModeDevice == 0 {
 					note += " [WARN: ioctl_dev has no effect on a non-device path]"
 				}
 
