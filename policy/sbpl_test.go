@@ -1,9 +1,11 @@
 package policy
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
-	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -27,8 +29,8 @@ func TestCompileSBPLPreamble(t *testing.T) {
 	}
 	const want = `(version 1)
 (deny default)
-(allow process-exec)
 (allow process-fork)
+(allow system-socket (socket-domain AF_UNIX))
 (allow signal (target same-sandbox))
 (allow process-info* (target same-sandbox))
 (allow file-ioctl (literal "/dev/null"))
@@ -62,7 +64,7 @@ func TestCompileSBPLFileAndDirectoryFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantFile := `(allow file-read* file-map-executable file-exec (literal (param "p0")))`
+	wantFile := `(allow file-read* file-map-executable process-exec (literal (param "p0")))`
 	if !strings.Contains(fileProfile, wantFile) {
 		t.Fatalf("file allow missing:\n%s", fileProfile)
 	}
@@ -80,7 +82,7 @@ func TestCompileSBPLFileAndDirectoryFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDir := `(allow file-read* file-write-data file-map-executable file-exec file-write-create file-write-unlink file-ioctl (subpath (param "p0")))`
+	wantDir := `(allow file-read* file-write-data file-map-executable process-exec file-write-create file-write-unlink file-ioctl (subpath (param "p0")))`
 	if !strings.Contains(dirProfile, wantDir) {
 		t.Fatalf("dir allow missing:\n%s", dirProfile)
 	}
@@ -143,7 +145,7 @@ func TestCompileSBPLIgnoreMissing(t *testing.T) {
 	}
 }
 
-func TestCompileSBPLGlobRegexParameter(t *testing.T) {
+func TestCompileSBPLGlobSnapshotsFiles(t *testing.T) {
 	dir := sbplTempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), nil, 0o644); err != nil {
 		t.Fatal(err)
@@ -159,15 +161,98 @@ func TestCompileSBPLGlobRegexParameter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(profile, `(allow file-write-data (regex (param "re0")))`) {
-		t.Fatalf("glob allow missing:\n%s", profile)
+	for _, name := range []string{"p0", "p1"} {
+		if !strings.Contains(profile, fmt.Sprintf(`(allow file-write-data (literal (param %q)))`, name)) {
+			t.Fatalf("glob allow missing:\n%s", profile)
+		}
 	}
-	if strings.Contains(profile, "a.txt") || strings.Contains(profile, "b.txt") || strings.Contains(profile, `[^/]*`) {
-		t.Fatalf("glob expanded into the profile:\n%s", profile)
+	if strings.Contains(profile, "regex") || strings.Contains(profile, "subpath") || strings.Contains(profile, dir) {
+		t.Fatalf("glob was not expanded to parameterized literals:\n%s", profile)
 	}
-	want := "^" + regexp.QuoteMeta(dir+"/") + `[^/]*\.txt$`
-	if len(params) != 2 || params[0] != "re0" || params[1] != want {
-		t.Fatalf("params = %#v, want re0 %q", params, want)
+	want := []string{"p0", filepath.Join(dir, "a.txt"), "p1", filepath.Join(dir, "b.txt")}
+	if !slices.Equal(params, want) {
+		t.Fatalf("params = %#v, want %#v", params, want)
+	}
+	// The compiled policy must not start matching new files later.
+	if err := os.WriteFile(filepath.Join(dir, "future.txt"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, updated, err := CompileSBPL(&Policy{FS: []FSRule{{Path: pattern, Access: "w"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated) != 6 || slices.Equal(params, updated) {
+		t.Fatalf("expected the new file only after recompilation: %#v, %#v", params, updated)
+	}
+}
+
+func TestCompileSBPLGlobDirectorySubtrees(t *testing.T) {
+	dir := sbplTempDir(t)
+	project := filepath.Join(dir, "project-a")
+	if err := os.MkdirAll(filepath.Join(project, "nested"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	profile, params, err := CompileSBPL(&Policy{FS: []FSRule{
+		{Path: filepath.Join(dir, "project-*"), Access: "rwcdu"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(params, []string{"p0", project}) {
+		t.Fatalf("params = %#v", params)
+	}
+	for _, want := range []string{
+		`(allow file-read* file-write-data file-write-create file-write-unlink (subpath (param "p0")))`,
+		`(allow network-outbound (remote unix-socket (subpath (param "p0"))))`,
+		`(allow network-bind network-inbound (local unix-socket (subpath (param "p0"))))`,
+	} {
+		if !strings.Contains(profile, want) {
+			t.Fatalf("missing recursive directory grant %s:\n%s", want, profile)
+		}
+	}
+	if strings.Contains(profile, "regex") {
+		t.Fatalf("glob still allows future matches:\n%s", profile)
+	}
+}
+
+func TestCompileSBPLMixedGlobAndSymlinks(t *testing.T) {
+	dir := sbplTempDir(t)
+	file := filepath.Join(dir, "a-file")
+	child := filepath.Join(dir, "b-dir")
+	if err := os.WriteFile(file, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(child, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// The final glob component can itself be a symlink, not just its parent.
+	target := sbplTempDir(t)
+	if err := os.Symlink(target, filepath.Join(dir, "c-link")); err != nil {
+		t.Fatal(err)
+	}
+	profile, params, err := CompileSBPL(&Policy{FS: []FSRule{
+		{Path: filepath.Join(dir, "*"), Access: "rw"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(params, []string{"p0", file, "p1", child, "p2", target}) {
+		t.Fatalf("params = %#v", params)
+	}
+	for _, want := range []string{
+		`(allow file-read* file-write-data (literal (param "p0")))`,
+		`(allow file-read* file-write-data (subpath (param "p1")))`,
+		`(allow file-read* file-write-data (subpath (param "p2")))`,
+	} {
+		if !strings.Contains(profile, want) {
+			t.Fatalf("missing typed grant %s:\n%s", want, profile)
+		}
+	}
+	for _, access := range []string{"c", "d"} {
+		_, _, err := CompileSBPL(&Policy{FS: []FSRule{{Path: filepath.Join(dir, "*"), Access: access}}})
+		if err == nil || !strings.Contains(err.Error(), "invalid on files") {
+			t.Fatalf("mixed glob %q: want file-type error, got %v", access, err)
+		}
 	}
 }
 
@@ -176,8 +261,17 @@ func TestCompileSBPLNet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(allow, "(allow network*)\n") {
-		t.Fatalf("missing network allow:\n%s", allow)
+	for _, rule := range []string{
+		`(allow system-socket (socket-domain AF_INET) (socket-domain AF_INET6))`,
+		`(allow network-outbound (remote ip "*:*"))`,
+		`(allow network-bind network-inbound (local ip "*:*"))`,
+	} {
+		if !strings.Contains(allow, rule) {
+			t.Fatalf("missing IP network grant %s:\n%s", rule, allow)
+		}
+	}
+	if strings.Contains(allow, "(allow network*)") || strings.Contains(allow, "unix-socket") {
+		t.Fatalf("net=allow bypasses filesystem socket policy:\n%s", allow)
 	}
 
 	for _, name := range []string{"omitted", "deny"} {
@@ -273,15 +367,15 @@ func TestCompileSBPLPathDoesNotEnterProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The star makes this a final-component glob, so the value is a regex
-	// parameter. Either way the scheme text stays out of the profile.
+	// The star makes this a final-component glob; its matched path still
+	// goes into a parameter, never into Scheme source.
 	if strings.Contains(profile, name) || strings.Contains(profile, "file-write*") {
 		t.Fatalf("path text entered the profile:\n%s", profile)
 	}
-	if !strings.Contains(profile, `(regex (param "re0"))`) {
-		t.Fatalf("missing regex param filter:\n%s", profile)
+	if !strings.Contains(profile, `(literal (param "p0"))`) {
+		t.Fatalf("missing literal param filter:\n%s", profile)
 	}
-	if len(params) != 2 || params[0] != "re0" || strings.Contains(profile, params[1]) {
+	if len(params) != 2 || params[0] != "p0" || params[1] != path || strings.Contains(profile, params[1]) {
 		t.Fatalf("params = %#v profile:\n%s", params, profile)
 	}
 
@@ -340,9 +434,11 @@ func TestCompileSBPLDoesNotCreateDirectories(t *testing.T) {
 
 func TestCompileSBPLUnixSocket(t *testing.T) {
 	sock := filepath.Join(sbplTempDir(t), "sock")
-	if err := os.WriteFile(sock, nil, 0o644); err != nil {
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer ln.Close()
 	profile, params, err := CompileSBPL(&Policy{
 		Name: "unix",
 		FS:   []FSRule{{Path: sock, Access: "u"}},
@@ -351,8 +447,8 @@ func TestCompileSBPLUnixSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
+		`(allow system-socket (socket-domain AF_UNIX))`,
 		`(allow network-outbound (remote unix-socket (path-literal (param "p0"))))`,
-		`(allow file-read* file-write-data (literal (param "p0")))`,
 	} {
 		if !strings.Contains(profile, want) {
 			t.Fatalf("missing %s in:\n%s", want, profile)
@@ -360,6 +456,47 @@ func TestCompileSBPLUnixSocket(t *testing.T) {
 	}
 	if len(params) != 2 || params[1] != sock {
 		t.Fatalf("params = %#v", params)
+	}
+	if strings.Contains(strings.TrimPrefix(profile, sbplPreamble), "file-") {
+		t.Fatalf("socket-only rule granted file-data access:\n%s", profile)
+	}
+}
+
+func TestCompileSBPLUnixPermissionsStaySeparate(t *testing.T) {
+	dir := sbplTempDir(t)
+	file := filepath.Join(dir, "regular")
+	if err := os.WriteFile(file, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dir, file, filepath.Join(dir, "*")} {
+		t.Run(path, func(t *testing.T) {
+			profile, _, err := CompileSBPL(&Policy{FS: []FSRule{{Path: path, Access: "u"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rules := strings.TrimPrefix(profile, sbplPreamble)
+			if strings.Contains(rules, "file-") || strings.Contains(rules, "network-bind") || strings.Contains(rules, "network-inbound") {
+				t.Fatalf("'u' granted data or server permissions:\n%s", rules)
+			}
+			filter := "path-literal"
+			if path == dir {
+				filter = "subpath"
+			}
+			want := fmt.Sprintf(`(allow network-outbound (remote unix-socket (%s (param "p0"))))`, filter)
+			if !strings.Contains(rules, want) {
+				t.Fatalf("missing %s:\n%s", want, rules)
+			}
+		})
+	}
+	profile, _, err := CompileSBPL(&Policy{FS: []FSRule{{Path: dir, Access: "c"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(profile, "network-outbound") {
+		t.Fatalf("'c' grants connections to existing host sockets:\n%s", profile)
+	}
+	if !strings.Contains(profile, `(allow network-bind network-inbound (local unix-socket (subpath (param "p0"))))`) {
+		t.Fatalf("'c' does not permit socket creation:\n%s", profile)
 	}
 }
 
@@ -396,14 +533,14 @@ func TestCompileSBPLCanonicalPaths(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := "^" + regexp.QuoteMeta(dir+"/") + `[^/]*\.txt$`
+		want := file
 		if len(params) != 2 || params[1] != want {
 			t.Fatalf("path %q: params = %#v, want %q", path, params, want)
 		}
 	}
 }
 
-func TestSBPLGlobMatchesFilepathPattern(t *testing.T) {
+func TestCompileSBPLGlobMatchesFilepathPattern(t *testing.T) {
 	patterns := []string{
 		"*.txt", "a?.txt", "*[^a]*", "[a-c]*",
 		`file\*.txt`, `file\?.txt`, `[\]]*`, `[\-]*`, `[\^]*`,
@@ -413,37 +550,54 @@ func TestSBPLGlobMatchesFilepathPattern(t *testing.T) {
 		"a.txt", "b.txt", "file*.txt", "file?.txt", "]x", "-x", "^x",
 		"abc", "é.txt", "d.txt", "n.txt", "1.txt", "\a.txt", "\n.txt",
 	}
+	dir := sbplTempDir(t)
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, pattern := range patterns {
 		t.Run(pattern, func(t *testing.T) {
-			var b strings.Builder
-			if err := writeGlobRegex(&b, pattern); err != nil {
-				t.Fatal(err)
-			}
-			re, err := regexp.Compile("^" + b.String() + "$")
+			profile, params, err := CompileSBPL(&Policy{FS: []FSRule{
+				{Path: filepath.Join(dir, pattern), Access: "r", IgnoreMissing: true},
+			}})
 			if err != nil {
 				t.Fatal(err)
+			}
+			got := make(map[string]bool)
+			for i := 1; i < len(params); i += 2 {
+				got[filepath.Base(params[i])] = true
 			}
 			for _, name := range names {
 				want, err := filepath.Match(pattern, name)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if got := re.MatchString(name); got != want {
-					t.Errorf("name %q: regex match = %v, want %v", name, got, want)
+				if got[name] != want {
+					t.Errorf("name %q: grant = %v, want %v", name, got[name], want)
 				}
 			}
-			for _, path := range []string{"child/file.txt", "/file.txt", "child/nested/file.txt"} {
-				if re.MatchString(path) {
-					t.Errorf("regex unexpectedly matches descendant path %q", path)
-				}
+			if strings.Contains(profile, "regex") || strings.Contains(profile, "subpath") {
+				t.Fatalf("file glob granted more than matched literals:\n%s", profile)
 			}
 		})
 	}
 }
 
-func TestSBPLGlobRejectsSeparatorRanges(t *testing.T) {
-	var b strings.Builder
-	if err := writeGlobRegex(&b, "*[.-0]*"); err == nil {
-		t.Fatal("expected a class spanning '/' to fail closed")
+func TestCompileSBPLExecuteIsPathScoped(t *testing.T) {
+	dir := sbplTempDir(t)
+	for _, access := range []string{"r", "rw", "x", "rx"} {
+		t.Run(access, func(t *testing.T) {
+			profile, _, err := CompileSBPL(&Policy{FS: []FSRule{{Path: dir, Access: access}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(profile, "file-exec") || strings.Contains(profile, "(allow process-exec)") {
+				t.Fatalf("invalid or unscoped execution permission:\n%s", profile)
+			}
+			if got, want := strings.Contains(profile, "process-exec"), strings.Contains(access, "x"); got != want {
+				t.Fatalf("access %q: process-exec = %v, want %v", access, got, want)
+			}
+		})
 	}
 }

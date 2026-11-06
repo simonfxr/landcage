@@ -143,9 +143,9 @@ and the existing `create_dir` checks. It must not import go-landlock.
 
 Paths go in as parameters, never as scheme literals. A path containing
 `") (allow file-write*` would otherwise rewrite the profile. Parameter names
-are generated (`p0`, `p1`, …). Regexes for globs are parameters too.
-Literal paths and glob parent directories are made absolute and symlink-resolved
-before emission, including macOS aliases such as `/tmp` and `/var`.
+are generated (`p0`, `p1`, …). Literal paths and each resolved glob match are
+made absolute and symlink-resolved before emission, including macOS aliases
+such as `/tmp` and `/var`.
 
 Preparation (`create_dir`, stat, glob) happens before compile, matching
 `buildFSRules` in `enforce.go`. Compile itself does not create directories
@@ -159,8 +159,8 @@ Every generated profile starts with a fixed preamble:
 ```scheme
 (version 1)
 (deny default)
-(allow process-exec)
 (allow process-fork)
+(allow system-socket (socket-domain AF_UNIX))
 (allow signal (target same-sandbox))
 (allow process-info* (target same-sandbox))
 (allow file-ioctl (literal "/dev/null"))
@@ -179,6 +179,11 @@ plus `"signal": "allow"`. Seatbelt cannot hide host processes and also let
 grow the mach and sysctl allowlist toward the set Chromium and Codex carry.
 Do not block this branch on that list.
 
+Execution is not allowed by the preamble: each `x` rule grants `process-exec`
+and executable mappings only on its own path. `file-exec` is not a Seatbelt
+operation. The AF_UNIX socket-creation grant does not allow pathname
+connections or binding; those are controlled separately below.
+
 ### Filesystem
 
 Default deny comes from the preamble. Emit one allow per resolved path.
@@ -187,10 +192,10 @@ Default deny comes from the preamble. Emit one allow per resolved path.
 |---|---|---|
 | `r` | `file-read*` | `(subpath (param "pN"))` for a directory, `(literal (param "pN"))` for a file |
 | `w` | `file-write-data` | same |
-| `x` | `file-map-executable` `file-exec` | same |
-| `c` on a directory | `file-write-create` | same |
+| `x` | `file-map-executable` `process-exec` | same |
+| `c` on a directory | `file-write-create`, plus UNIX `network-bind` and `network-inbound` | filesystem `subpath`; `(local unix-socket (subpath (param "pN")))` for socket bind/accept |
 | `d` on a directory | `file-write-unlink` | same |
-| `u` | `network-outbound` with `(remote unix-socket (path-literal (param "pN")))`, plus `file-read*` `file-write-data` on that literal | |
+| `u` | `network-outbound` | `(remote unix-socket (path-literal (param "pN")))` for an exact path; `(remote unix-socket (subpath (param "pN")))` for a directory |
 | `ioctl_dev` | `file-ioctl` | same filter |
 
 `c` or `d` on a path that stats as a file is an error, same as Landlock.
@@ -199,22 +204,29 @@ with `ignore_missing` is skipped; without it, compile fails.
 `refer` has no Seatbelt right. `c` and `d` on two directories are enough to
 rename between them. Do not emit anything for `refer`.
 
-A final-component glob becomes `(regex (param "reN"))`. The parameter value
-is a full-path regular expression: quote the directory, map `*` to `[^/]*`
-and `?` to `[^/]`, and anchor it. Do not expand the glob to the matches that
-exist at compile time. Seatbelt evaluates the regex at access time, so a file
-created later still matches. Landlock snapshots globs; this is wider, and it
-is the behavior to document in a comment next to the compiler.
-Glob escapes are preserved as literal characters, and negated character classes
-exclude `/`. Positive character ranges spanning `/` are rejected rather than
-allowing a final-component pattern to match descendant paths.
+`u` never adds file read/write permissions. A regular file at the granted
+pathname, including one replacing a socket later, must not become readable
+or writable merely because of a connection grant. `c` allows creating and
+serving UNIX sockets but does not imply `u` for connecting to host sockets.
+
+Final-component globs use the same setup-time resolver as Landlock. Each
+existing match gets its own literal or recursive subpath grant, including
+separate file/directory treatment for mixed matches. A matched directory's
+future children are covered, but new sibling matches are not. Symlinks in
+the final component are resolved too. No glob-to-regex translation is used.
+
+Seatbelt remains pathname-based, not inode-based: replacing an allowed
+pathname can retain access, while moving an allowed inode elsewhere need
+not retain it. This is not equivalent to Landlock across rename/replacement.
+Also, Seatbelt requires `u` even for sockets created inside the sandbox;
+it does not reproduce Landlock's same-domain socket exemption.
 
 ### Network
 
 | Policy | SBPL |
 |---|---|
-| `"net": "allow"` | `(allow network*)` |
-| `"net": "deny"` or omitted | no network allow; the default deny stands |
+| `"net": "allow"` | `network-outbound` on `(remote ip "*:*")`; `network-bind` and `network-inbound` on `(local ip "*:*")` |
+| `"net": "deny"` or omitted | no IP network allow; filesystem `u`/`c` rules still control UNIX sockets |
 | TCP connect port N | `(allow network-outbound (remote tcp "*:N"))` |
 | TCP bind port N, N ≠ 0 | `(allow network-bind (local tcp "*:N"))` plus `(allow network-inbound (local tcp "*:N"))` |
 | UDP connect / bind | same with `udp` |
@@ -224,6 +236,11 @@ Port 0 is broader than Landlock. Seatbelt has no "ephemeral only" port.
 Say so in a comment. Do not invent a narrower syntax.
 Inbound permission uses the same local endpoint filter: binding alone does not
 allow a Seatbelt-confined server to receive traffic.
+
+IP grants also permit `system-socket` for AF_INET and AF_INET6. Network allow
+does not emit a blanket `network*`: that would also allow UNIX connections
+outside the filesystem allowlist. UNIX socket grants remain independent of
+the IP network policy, as they are on Linux.
 
 ### IPC and namespaces
 
@@ -263,19 +280,24 @@ Keep the Linux enforce path behavior-identical. Do not generate SBPL on Linux.
 
 ### This branch
 
-1. SBPL compiler in `policy/sbpl.go`, parameters for every path and regex.
-2. Tests in `policy/sbpl_test.go` covering preamble, file vs directory filters, `c` on a file, `ignore_missing`, a glob regex parameter, `net` allow / deny / port 443, and a path containing `)` staying out of the profile text.
+1. SBPL compiler in `policy/sbpl.go`, parameters for every resolved path.
+2. Tests in `policy/sbpl_test.go` covering scoped execution, socket-only grants, recursive directory/glob grants, `c` on a file, `ignore_missing`, IP/UNIX network separation, and paths containing `)` staying out of the profile text.
 3. Darwin cgo apply, and a non-cgo Darwin stub that errors.
 4. `runSandboxed` dispatch via build tags, including the DYLD unset and the `unshare` warning.
 5. Linux-only build tags plus Darwin stubs so both test commands above pass.
 6. One line in the README documentation list pointing here. Already added with this doc; do not rewrite the README.
+7. Native subprocess enforcement tests in `policy/seatbelt_darwin_test.go`.
+   Run on a real Mac with `CGO_ENABLED=1 go test -count=1 -v ./policy`.
+   Profile-application failures are test failures, not skips. Cross-building
+   (including the cgo executable) does not run these enforcement checks or
+   validate the generated profile with Apple's libsandbox.
 
 ### Later
 
 - Mach and sysctl preamble large enough for compilers, `getpwuid`, and TLS (`trustd`), measured by running a real command under the agent profile on a Mac.
 - `ps` policy: either keep sysmond denied, or add an explicit opt-in.
 - Dry-run on Darwin prints the SBPL profile and the parameter list.
-- A Mac CI job with cgo that applies a profile to `/usr/bin/true` and checks a denied path.
+- Run the native tests on supported macOS versions and add them to Mac CI.
 - Symlink handling. Seatbelt filters the path string. A symlink planted in a writable directory is the escape to test before calling the backends equivalent.
 - `sandbox_compile_string` / `sandbox_apply` if we ever need to compile in the parent and apply in a child. Not needed while Darwin uses in-process `exec`.
 

@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
-	"unicode/utf8"
 )
 
 // sbplPreamble is applied to every generated profile. Seatbelt cannot hide
@@ -14,8 +12,8 @@ import (
 // (allow signal), which would reach the host. v1 does not allow sysmond.
 const sbplPreamble = `(version 1)
 (deny default)
-(allow process-exec)
 (allow process-fork)
+(allow system-socket (socket-domain AF_UNIX))
 (allow signal (target same-sandbox))
 (allow process-info* (target same-sandbox))
 (allow file-ioctl (literal "/dev/null"))
@@ -29,14 +27,14 @@ const sbplPreamble = `(version 1)
 `
 
 // CompileSBPL compiles p into a Seatbelt profile and a parameter list of
-// key, value, key, value, …. Paths and glob regexes are parameters, never
+// key, value, key, value, …. Paths are parameters, never
 // scheme literals. CompileSBPL does not create directories; the Darwin
 // enforce path calls CreatePolicyDirs first.
 //
-// A final-component glob is emitted as an anchored regular expression, not
-// as the paths that exist now. Landlock snapshots glob matches. Seatbelt
-// evaluates the regex at access time, so a file created later still matches.
-// That is wider than Landlock.
+// Like Landlock, final-component globs are resolved at setup time. Each
+// matched directory grants access to its subtree, including future children.
+// Unlike Landlock's inode rules, Seatbelt rules still follow pathnames:
+// replacing a matched file or directory does not revoke its grant.
 //
 // Bind on port 0 is also wider than Landlock. Seatbelt has no "ephemeral
 // only" port, so a bind of port 0 allows every local port ("*:*").
@@ -75,12 +73,11 @@ type sbplGen struct {
 	b      strings.Builder
 	params []string
 	pathN  int
-	reN    int
 }
 
-func (g *sbplGen) addParam(prefix string, n *int, value string) string {
-	name := fmt.Sprintf("%s%d", prefix, *n)
-	*n++
+func (g *sbplGen) addPath(value string) string {
+	name := fmt.Sprintf("p%d", g.pathN)
+	g.pathN++
 	g.params = append(g.params, name, value)
 	return name
 }
@@ -105,38 +102,6 @@ func (g *sbplGen) compileFS(r *FSRule) error {
 		}
 		return fmt.Errorf("path is empty")
 	}
-	if hasGlobMeta(r.Path) {
-		return g.compileGlob(r)
-	}
-	return g.compileLiteral(r)
-}
-
-func (g *sbplGen) compileLiteral(r *FSRule) error {
-	fi, err := os.Stat(r.Path)
-	if err != nil {
-		if r.IgnoreMissing && isPathError(err) {
-			return nil
-		}
-		return err
-	}
-	if err := fsRuleError(r, fi.IsDir()); err != nil {
-		return fmt.Errorf("path %s: %w", r.Path, err)
-	}
-	path, err := canonicalSBPLPath(r.Path)
-	if err != nil {
-		return err
-	}
-	param := g.addParam("p", &g.pathN, path)
-	kind := "literal"
-	if fi.IsDir() {
-		kind = "subpath"
-	}
-	g.allow(fsOps(r, fi.IsDir()), fmt.Sprintf("(%s (param %q))", kind, param))
-	g.allowUnix(r, param, "literal")
-	return nil
-}
-
-func (g *sbplGen) compileGlob(r *FSRule) error {
 	paths, err := resolvePath(r.Path)
 	if err != nil {
 		if r.IgnoreMissing && isPathError(err) {
@@ -144,63 +109,60 @@ func (g *sbplGen) compileGlob(r *FSRule) error {
 		}
 		return err
 	}
-	if len(paths) == 0 {
-		if r.IgnoreMissing {
-			return nil
-		}
+	if len(paths) == 0 && !r.IgnoreMissing {
 		return fmt.Errorf("glob matched no paths: %s", r.Path)
 	}
-
-	saw := false
-	allDirs := true
-	for _, p := range paths {
-		fi, err := os.Stat(p)
-		if err != nil {
-			if r.IgnoreMissing && os.IsNotExist(err) {
-				continue
-			}
+	for _, path := range paths {
+		if err := g.compilePath(r, path); err != nil {
 			return err
 		}
-		saw = true
-		if !fi.IsDir() {
-			allDirs = false
-		}
-		if err := fsRuleError(r, fi.IsDir()); err != nil {
-			return fmt.Errorf("path %s: %w", p, err)
-		}
 	}
-	if !saw {
-		return nil
-	}
-
-	re, err := globPathRegex(r.Path)
-	if err != nil {
-		return err
-	}
-	param := g.addParam("re", &g.reN, re)
-	// The filter is the regex, not the paths that matched at compile time.
-	g.allow(fsOps(r, allDirs), fmt.Sprintf("(regex (param %q))", param))
-	// A glob is not a single socket path, so the unix-socket filter uses the
-	// same regex parameter instead of path-literal.
-	g.allowUnix(r, param, "regex")
 	return nil
 }
 
-func (g *sbplGen) allowUnix(r *FSRule, param, kind string) {
-	if !strings.ContainsRune(r.Access, 'u') {
-		return
+func (g *sbplGen) compilePath(r *FSRule, path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		if r.IgnoreMissing && isPathError(err) {
+			return nil
+		}
+		return err
 	}
-	filter := "path-literal"
-	fileKind := "literal"
-	if kind == "regex" {
-		filter = "regex"
-		fileKind = "regex"
+	if err := fsRuleError(r, fi.IsDir()); err != nil {
+		return fmt.Errorf("path %s: %w", path, err)
 	}
-	g.allow([]string{"network-outbound"}, fmt.Sprintf("(remote unix-socket (%s (param %q)))", filter, param))
-	g.allow([]string{"file-read*", "file-write-data"}, fmt.Sprintf("(%s (param %q))", fileKind, param))
+	path, err = canonicalSBPLPath(path)
+	if err != nil {
+		return err
+	}
+	param := g.addPath(path)
+	kind := "literal"
+	if fi.IsDir() {
+		kind = "subpath"
+	}
+	g.allow(fsOps(r, fi.IsDir()), fmt.Sprintf("(%s (param %q))", kind, param))
+	g.allowUnix(r, param, fi.IsDir())
+	return nil
 }
 
-// fsOps lists Seatbelt file operations for r. refer has no Seatbelt right;
+func (g *sbplGen) allowUnix(r *FSRule, param string, isDir bool) {
+	// Never add file-data rights for 'u': a socket path can be replaced by
+	// an ordinary file, and directory grants can contain both file types.
+	filter := "path-literal"
+	if isDir {
+		filter = "subpath"
+	}
+	if strings.ContainsRune(r.Access, 'u') {
+		g.allow([]string{"network-outbound"}, fmt.Sprintf("(remote unix-socket (%s (param %q)))", filter, param))
+	}
+	// Landlock's directory 'c' includes MAKE_SOCK. Seatbelt additionally
+	// checks bind/accept independently from creating the filesystem entry.
+	if isDir && strings.ContainsRune(r.Access, 'c') {
+		g.allow([]string{"network-bind", "network-inbound"}, fmt.Sprintf("(local unix-socket (%s (param %q)))", filter, param))
+	}
+}
+
+// fsOps lists Seatbelt path-scoped operations for r. refer has no Seatbelt right;
 // c and d on two directories are enough to rename between them. u is emitted
 // separately because its filter is a UNIX-socket address.
 func fsOps(r *FSRule, isDir bool) []string {
@@ -220,7 +182,7 @@ func fsOps(r *FSRule, isDir bool) []string {
 	}
 	if strings.ContainsRune(r.Access, 'x') {
 		add("file-map-executable")
-		add("file-exec")
+		add("process-exec")
 	}
 	if isDir && strings.ContainsRune(r.Access, 'c') {
 		add("file-write-create")
@@ -244,120 +206,18 @@ func canonicalSBPLPath(path string) (string, error) {
 	return filepath.Abs(path)
 }
 
-// globPathRegex quotes the canonical directory, maps * to [^/]* and ? to
-// [^/], and anchors the full path.
-func globPathRegex(path string) (string, error) {
-	dir, base := filepath.Split(path)
-	if dir == "" {
-		dir = "."
-	}
-	dir, err := canonicalSBPLPath(dir)
-	if err != nil {
-		return "", err
-	}
-	if !strings.HasSuffix(dir, string(filepath.Separator)) {
-		dir += string(filepath.Separator)
-	}
-	var b strings.Builder
-	b.WriteByte('^')
-	b.WriteString(regexp.QuoteMeta(dir))
-	if err := writeGlobRegex(&b, base); err != nil {
-		return "", err
-	}
-	b.WriteByte('$')
-	return b.String(), nil
-}
-
-func writeGlobRegex(b *strings.Builder, pat string) error {
-	// Validate even when the directory is empty; in particular, Go glob
-	// classes and regexp classes have different rules for '-' and ']'.
-	if _, err := filepath.Match(pat, ""); err != nil {
-		return fmt.Errorf("bad glob pattern %q: %w", pat, err)
-	}
-	for i := 0; i < len(pat); i++ {
-		switch pat[i] {
-		case '*':
-			b.WriteString(`[^/]*`)
-		case '?':
-			b.WriteString(`[^/]`)
-		case '[':
-			j, err := globClassEnd(pat, i)
-			if err != nil {
-				return err
-			}
-			class := globClassRegex(pat[i:j])
-			if strings.HasPrefix(class, "[^") {
-				// A negated glob class only sees directory entry names.
-				// Its regex equivalent must not match a path separator.
-				class = "[^/" + class[2:]
-			}
-			re, err := regexp.Compile(class)
-			if err != nil {
-				return fmt.Errorf("unsupported glob class %q: %w", class, err)
-			}
-			if re.MatchString("/") {
-				return fmt.Errorf("glob class %q can match a path separator", class)
-			}
-			b.WriteString(class)
-			i = j - 1
-		case '\\':
-			i++
-			_, size := utf8.DecodeRuneInString(pat[i:])
-			b.WriteString(regexp.QuoteMeta(pat[i : i+size]))
-			i += size - 1
-		default:
-			b.WriteString(regexp.QuoteMeta(pat[i : i+1]))
-		}
-	}
-	return nil
-}
-
-// Go globs treat \d, \n, etc. as literal letters, while regexes interpret
-// them as character classes or control characters. Only retain escaping
-// where it is needed for a literal inside a regex character class.
-func globClassRegex(class string) string {
-	var b strings.Builder
-	for i := 0; i < len(class); i++ {
-		if class[i] != '\\' {
-			b.WriteByte(class[i])
-			continue
-		}
-		i++
-		_, size := utf8.DecodeRuneInString(class[i:])
-		literal := class[i : i+size]
-		if literal == "-" {
-			b.WriteString(`\-`)
-		} else {
-			b.WriteString(regexp.QuoteMeta(literal))
-		}
-		i += size - 1
-	}
-	return b.String()
-}
-
-func globClassEnd(pat string, i int) (int, error) {
-	j := i + 1
-	if j < len(pat) && pat[j] == '^' {
-		j++
-	}
-	for j < len(pat) && pat[j] != ']' {
-		if pat[j] == '\\' {
-			j++
-		}
-		j++
-	}
-	if j >= len(pat) {
-		return 0, fmt.Errorf("bad glob pattern %q", pat)
-	}
-	return j + 1, nil
-}
-
 func (g *sbplGen) compileNet(net *NetConfig) {
 	if net == nil {
 		return
 	}
+	if net.Allow || len(net.Rules) > 0 {
+		g.allow([]string{"system-socket"}, "(socket-domain AF_INET) (socket-domain AF_INET6)")
+	}
 	if net.Allow {
-		g.b.WriteString("(allow network*)\n")
+		// Network policy controls IP traffic, not filesystem UNIX sockets.
+		// A bare network* would bypass the separate 'u' and 'c' grants.
+		g.allow([]string{"network-outbound"}, `(remote ip "*:*")`)
+		g.allow([]string{"network-bind", "network-inbound"}, `(local ip "*:*")`)
 		return
 	}
 	for i := range net.Rules {
