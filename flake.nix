@@ -15,7 +15,7 @@
       flib = flake-utils.lib;
       pkg =
         pkgs:
-        pkgs.buildGo126Module {
+        pkgs.buildGo127Module {
           name = "landcage";
           version = "0.0.1";
           src = pkgs.lib.fileset.toSource {
@@ -26,7 +26,7 @@
               (pkgs.lib.fileset.fileFilter (f: f.hasExt "go") ./.)
             ];
           };
-          vendorHash = "sha256-3l69xlnFUPoUR/nept0+Qfwy4gb5sDDFwRVHcL2guLc=";
+          vendorHash = "sha256-YJv8ZGY+MyJHdUVazJliPmlxOkkSwcN6wM6TZjfzH1w=";
           env.CGO_ENABLED = "0";
           ldflags = [
             "-s"
@@ -48,7 +48,7 @@
         packages.landcage = pkg pkgs;
         devShells.default = pkgs.mkShell {
           packages = [
-            pkgs.go_1_26
+            pkgs.go_1_27
             pkgs.gopls
           ];
         };
