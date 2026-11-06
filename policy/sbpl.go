@@ -10,12 +10,17 @@ import (
 // sbplPreamble is applied to every generated profile. Seatbelt cannot hide
 // host processes, so signals stay limited to this sandbox instead of a bare
 // (allow signal), which would reach the host. v1 does not allow sysmond.
+// dyld shared-cache startup needs data access to the root directory itself;
+// realpath also needs its metadata. Neither literal grant covers descendants.
+// The linker needs hw.pagesize_compat; do not grant unrestricted sysctl reads.
 const sbplPreamble = `(version 1)
 (deny default)
 (allow process-fork)
 (allow system-socket (socket-domain AF_UNIX))
 (allow signal (target same-sandbox))
 (allow process-info* (target same-sandbox))
+(allow file-read-data file-read-metadata (literal "/"))
+(allow sysctl-read (sysctl-name "hw.pagesize_compat"))
 (allow file-ioctl (literal "/dev/null"))
 (allow file-read* file-write-data (literal "/dev/null"))
 (allow file-read* (literal "/dev/urandom"))
@@ -39,7 +44,7 @@ const sbplPreamble = `(version 1)
 // Bind on port 0 is also wider than Landlock. Seatbelt has no "ephemeral
 // only" port, so a bind of port 0 allows every local port ("*:*").
 func CompileSBPL(p *Policy) (string, []string, error) {
-	g := &sbplGen{}
+	g := &sbplGen{aliases: make(map[string]bool)}
 	g.b.WriteString(sbplPreamble)
 
 	for i := range p.FS {
@@ -70,9 +75,10 @@ func CreatePolicyDirs(p *Policy) error {
 }
 
 type sbplGen struct {
-	b      strings.Builder
-	params []string
-	pathN  int
+	b       strings.Builder
+	params  []string
+	pathN   int
+	aliases map[string]bool
 }
 
 func (g *sbplGen) addPath(value string) string {
@@ -131,17 +137,71 @@ func (g *sbplGen) compilePath(r *FSRule, path string) error {
 	if err := fsRuleError(r, fi.IsDir()); err != nil {
 		return fmt.Errorf("path %s: %w", path, err)
 	}
-	path, err = canonicalSBPLPath(path)
+	canonical, err := canonicalSBPLPath(path)
 	if err != nil {
 		return err
 	}
-	param := g.addPath(path)
+	param := g.addPath(canonical)
 	kind := "literal"
 	if fi.IsDir() {
 		kind = "subpath"
 	}
 	g.allow(fsOps(r, fi.IsDir()), fmt.Sprintf("(%s (param %q))", kind, param))
 	g.allowUnix(r, param, fi.IsDir())
+	return g.allowPathAliases(path)
+}
+
+// Seatbelt checks symlink metadata while resolving an aliased pathname, before
+// checking the operation on its canonical target. Permit only those symlinks,
+// not metadata or data reads of their parents or siblings. Follow link targets
+// too, since one alias can resolve through another. canonicalSBPLPath has
+// already rejected dangling links and loops before this is called.
+func (g *sbplGen) allowPathAliases(path string) error {
+	if !filepath.IsAbs(path) {
+		dir, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		path = dir + "/" + path
+	}
+	// Do not Clean before walking: link/.. must resolve link before "..".
+	prefix := "/"
+	for _, part := range strings.Split(path, "/") {
+		if part == "" {
+			continue
+		}
+		parent := prefix
+		candidate := parent + part
+		prefix = candidate + "/"
+		fi, err := os.Lstat(candidate)
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		parent, err = canonicalSBPLPath(parent)
+		if err != nil {
+			return err
+		}
+		alias := filepath.Join(parent, part)
+		if g.aliases[alias] {
+			continue
+		}
+		g.aliases[alias] = true
+		target, err := os.Readlink(alias)
+		if err != nil {
+			return err
+		}
+		if !filepath.IsAbs(target) {
+			target = parent + "/" + target
+		}
+		param := g.addPath(alias)
+		g.allow([]string{"file-read-metadata"}, fmt.Sprintf("(literal (param %q))", param))
+		if err := g.allowPathAliases(target); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

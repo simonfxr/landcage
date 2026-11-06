@@ -33,6 +33,8 @@ func TestCompileSBPLPreamble(t *testing.T) {
 (allow system-socket (socket-domain AF_UNIX))
 (allow signal (target same-sandbox))
 (allow process-info* (target same-sandbox))
+(allow file-read-data file-read-metadata (literal "/"))
+(allow sysctl-read (sysctl-name "hw.pagesize_compat"))
 (allow file-ioctl (literal "/dev/null"))
 (allow file-read* file-write-data (literal "/dev/null"))
 (allow file-read* (literal "/dev/urandom"))
@@ -236,13 +238,14 @@ func TestCompileSBPLMixedGlobAndSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(params, []string{"p0", file, "p1", child, "p2", target}) {
+	if !slices.Equal(params, []string{"p0", file, "p1", child, "p2", target, "p3", filepath.Join(dir, "c-link")}) {
 		t.Fatalf("params = %#v", params)
 	}
 	for _, want := range []string{
 		`(allow file-read* file-write-data (literal (param "p0")))`,
 		`(allow file-read* file-write-data (subpath (param "p1")))`,
 		`(allow file-read* file-write-data (subpath (param "p2")))`,
+		`(allow file-read-metadata (literal (param "p3")))`,
 	} {
 		if !strings.Contains(profile, want) {
 			t.Fatalf("missing typed grant %s:\n%s", want, profile)
@@ -514,9 +517,11 @@ func TestCompileSBPLCanonicalPaths(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(alias, "note.txt"),
 		"alias/note.txt",
+		alias + "/../" + filepath.Base(dir) + "/note.txt",
+		"alias/../" + filepath.Base(dir) + "/note.txt",
 		"alias",
 	} {
-		_, params, err := CompileSBPL(&Policy{FS: []FSRule{{Path: path, Access: "r"}}})
+		profile, params, err := CompileSBPL(&Policy{FS: []FSRule{{Path: path, Access: "r"}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -524,8 +529,11 @@ func TestCompileSBPLCanonicalPaths(t *testing.T) {
 		if path == "alias" {
 			want = dir
 		}
-		if len(params) != 2 || params[1] != want {
+		if !slices.Equal(params, []string{"p0", want, "p1", alias}) {
 			t.Fatalf("path %q: params = %#v, want %q", path, params, want)
+		}
+		if !strings.Contains(profile, `(allow file-read-metadata (literal (param "p1")))`) {
+			t.Fatalf("missing alias metadata grant:\n%s", profile)
 		}
 	}
 	for _, path := range []string{filepath.Join(alias, "*.txt"), "alias/*.txt"} {
@@ -534,9 +542,57 @@ func TestCompileSBPLCanonicalPaths(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := file
-		if len(params) != 2 || params[1] != want {
+		if !slices.Equal(params, []string{"p0", want, "p1", alias}) {
 			t.Fatalf("path %q: params = %#v, want %q", path, params, want)
 		}
+	}
+}
+
+func TestCompileSBPLChainedAliases(t *testing.T) {
+	dir := sbplTempDir(t)
+	target := filepath.Join(dir, "target")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(target, "file")
+	if err := os.WriteFile(file, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Include a relative link target and a symlink in that target's parent.
+	for alias, target := range map[string]string{
+		"first":  "second",
+		"second": "target",
+		"third":  "first/file",
+	} {
+		if err := os.Symlink(target, filepath.Join(dir, alias)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	profile, params, err := CompileSBPL(&Policy{FS: []FSRule{
+		{Path: filepath.Join(dir, "third"), Access: "w"},
+		{Path: filepath.Join(dir, "first", "file"), Access: "w"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantParams := []string{
+		"p0", file,
+		"p1", filepath.Join(dir, "third"),
+		"p2", filepath.Join(dir, "first"),
+		"p3", filepath.Join(dir, "second"),
+		"p4", file,
+	}
+	if !slices.Equal(params, wantParams) {
+		t.Fatalf("params = %#v, want %#v", params, wantParams)
+	}
+	want := sbplPreamble + `(allow file-write-data (literal (param "p0")))
+(allow file-read-metadata (literal (param "p1")))
+(allow file-read-metadata (literal (param "p2")))
+(allow file-read-metadata (literal (param "p3")))
+(allow file-write-data (literal (param "p4")))
+`
+	if profile != want {
+		t.Fatalf("profile =\n%s\nwant:\n%s", profile, want)
 	}
 }
 

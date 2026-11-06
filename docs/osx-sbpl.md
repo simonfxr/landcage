@@ -146,6 +146,10 @@ Paths go in as parameters, never as scheme literals. A path containing
 are generated (`p0`, `p1`, …). Literal paths and each resolved glob match are
 made absolute and symlink-resolved before emission, including macOS aliases
 such as `/tmp` and `/var`.
+Each symlink traversed in a policy path also gets a literal
+`file-read-metadata` grant, including chained targets: otherwise Seatbelt denies
+access through the alias before checking the canonical target's grant. This
+reveals those aliases' metadata, not sibling data or directory contents.
 
 Preparation (`create_dir`, stat, glob) happens before compile, matching
 `buildFSRules` in `enforce.go`. Compile itself does not create directories
@@ -163,6 +167,8 @@ Every generated profile starts with a fixed preamble:
 (allow system-socket (socket-domain AF_UNIX))
 (allow signal (target same-sandbox))
 (allow process-info* (target same-sandbox))
+(allow file-read-data file-read-metadata (literal "/"))
+(allow sysctl-read (sysctl-name "hw.pagesize_compat"))
 (allow file-ioctl (literal "/dev/null"))
 (allow file-read* file-write-data (literal "/dev/null"))
 (allow file-read* (literal "/dev/urandom"))
@@ -183,6 +189,17 @@ Execution is not allowed by the preamble: each `x` rule grants `process-exec`
 and executable mappings only on its own path. `file-exec` is not a Seatbelt
 operation. The AF_UNIX socket-creation grant does not allow pathname
 connections or binding; those are controlled separately below.
+
+The literal root-directory data grant is required for dyld shared-cache startup
+on the tested macOS 26.7.2 VM: without it, even `/bin/echo` aborts despite `rx`
+grants for `/bin`, `/usr`, and `/System`. The dyld abort payload is
+`failed to open root directory: /: 1`. Metadata access alone does not fix it,
+but is also needed by `realpath` (observed in Command Line Tools Python).
+These grants permit listing/statting `/` itself, not reading or executing
+arbitrary descendants; do not replace them with a recursive `(subpath "/")`.
+The one named sysctl grant is also measured: denying `hw.pagesize_compat`
+causes Apple's linker to abort on a buffer-alignment assertion. No general
+`sysctl-read` grant is needed for the tested C build.
 
 ### Filesystem
 
@@ -220,6 +237,13 @@ pathname can retain access, while moving an allowed inode elsewhere need
 not retain it. This is not equivalent to Landlock across rename/replacement.
 Also, Seatbelt requires `u` even for sockets created inside the sandbox;
 it does not reproduce Landlock's same-domain socket exemption.
+
+**Create-only is weaker than Landlock:** on macOS 26.7.2, `file-write-create`
+allows opening a new regular file for writing and writing through that
+descriptor even without `file-write-data`. Thus `c` without `w` is not a
+guarantee against writing newly created files. Reopening that file for writing,
+or writing/truncating an existing file, still requires `w`. The native mutation
+tests explicitly cover this difference; it is not fixed by the current mapping.
 
 ### Network
 
@@ -307,3 +331,46 @@ Keep the Linux enforce path behavior-identical. Do not generate SBPL on Linux.
 - Apple Containerization, Virtualization.framework, or a Linux guest. Those do not run this profile's Darwin toolchain or its host UNIX sockets.
 - A second policy schema, profile inheritance, or Mach rules in the JSON.
 - Changing Linux Landlock behavior.
+
+## Native VM validation (2026-11-06)
+
+Tested on the `~/src/osx-vm` guest: macOS 26.7.2, x86_64, Go 1.27.3,
+with cgo enabled. This is one OS/architecture, not a general security proof.
+
+Run the native suite with the guest's normal `TMPDIR` (do not canonicalize it
+to hide alias failures):
+
+```sh
+go test -count=1 -timeout=3m ./...
+go test -count=10 -timeout=3m -run '^TestSeatbeltEnforce' ./policy
+```
+
+Runtime coverage includes:
+
+- Allowed and denied file reads/writes, execution, UNIX socket connections and
+  creation, and setup-time glob snapshots.
+- IPv4 TCP/UDP connect and bind: default deny, unrestricted IP, exact ports,
+  protocol separation, connect versus bind, and the documented port-zero
+  broadening. UDP connect probes send and receive actual datagrams.
+- File creation, existing-file writes, truncation, append-open, mkdir, file and
+  directory deletion. Create-only writable descriptors are a known difference.
+- A symlink planted after compilation in an allowed directory cannot grant
+  read, write, create, or delete access to an otherwise denied target directory.
+
+Real-command probes after the fixes:
+
+- `/bin/echo`, a shell, direct Command Line Tools Python, and compiling, linking,
+  and executing a C program work with explicit dependency/work-directory grants
+  and an explicit SDK path.
+- Apple's `/usr/bin/python3` and `/usr/bin/clang` launcher shims require
+  `/var/select`, developer-tool paths, and xcrun cache access. The generic
+  `/bin`, `/usr`, `/System` grants alone are not a usable developer policy.
+- Linking initially reached `ld`, then failed its `UnsafeHeaderWriter.cpp:78`
+  buffer-alignment assertion. An identical unsandboxed build succeeded;
+  granting reads across `/` did not fix it. Isolating sysctl grants identified
+  `hw.pagesize_compat`; the preamble now permits only that key. A native
+  regression checks it remains readable while `hw.ncpu` stays denied.
+
+Still unproven here: arm64, other macOS releases, IPv6, sandboxed servers'
+inbound traffic, DNS/TLS and Mach-service requirements of real developer tools,
+rename/replacement races, and comprehensive inherited-descriptor/IPC behavior.

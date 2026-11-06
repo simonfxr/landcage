@@ -58,6 +58,12 @@ func TestSeatbeltEnforceHelper(t *testing.T) {
 
 func (p seatbeltProbe) run() error {
 	switch p.Op {
+	case "sysctl":
+		value, err := syscall.SysctlUint32(p.Path)
+		if err == nil && value == 0 {
+			return fmt.Errorf("sysctl %s returned zero", p.Path)
+		}
+		return err
 	case "read":
 		_, err := os.ReadFile(p.Path)
 		return err
@@ -69,6 +75,62 @@ func (p seatbeltProbe) run() error {
 		defer f.Close()
 		_, err = f.Write([]byte("changed"))
 		return err
+	case "truncate", "append", "create":
+		flags := os.O_WRONLY
+		switch p.Op {
+		case "truncate":
+			flags |= os.O_TRUNC
+		case "append":
+			flags |= os.O_APPEND
+		case "create":
+			flags |= os.O_CREATE | os.O_EXCL
+		}
+		f, err := os.OpenFile(p.Path, flags, 0600)
+		if err != nil {
+			return err
+		}
+		if p.Op == "create" {
+			if _, err := f.Write([]byte("created")); err != nil {
+				f.Close()
+				return err
+			}
+		}
+		return f.Close()
+	case "mkdir":
+		return os.Mkdir(p.Path, 0700)
+	case "remove":
+		return os.Remove(p.Path)
+	case "tcp-connect", "udp-connect":
+		proto := "tcp4"
+		if p.Op == "udp-connect" {
+			proto = "udp4"
+		}
+		c, err := net.DialTimeout(proto, p.Path, 2*time.Second)
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		if proto == "udp4" {
+			c.SetDeadline(time.Now().Add(2 * time.Second))
+			if _, err := c.Write([]byte("probe")); err != nil {
+				return err
+			}
+			var b [16]byte
+			_, err = c.Read(b[:])
+		}
+		return err
+	case "tcp-bind":
+		l, err := net.Listen("tcp4", p.Path)
+		if err != nil {
+			return err
+		}
+		return l.Close()
+	case "udp-bind":
+		l, err := net.ListenPacket("udp4", p.Path)
+		if err != nil {
+			return err
+		}
+		return l.Close()
 	case "exec":
 		return exec.Command(p.Path).Run()
 	case "connect":
@@ -88,6 +150,13 @@ func (p seatbeltProbe) run() error {
 	default:
 		return fmt.Errorf("unknown probe %q", p.Op)
 	}
+}
+
+func TestSeatbeltEnforceSysctl(t *testing.T) {
+	seatbeltRun(t, seatbeltCompile(t, &Policy{}, []seatbeltProbe{
+		{"sysctl", "hw.pagesize_compat", false},
+		{"sysctl", "hw.ncpu", true},
+	}))
 }
 
 func seatbeltCompile(t *testing.T, policy *Policy, probes []seatbeltProbe) seatbeltRequest {
@@ -156,7 +225,8 @@ func TestSeatbeltEnforceExec(t *testing.T) {
 			}
 			seatbeltRun(t, seatbeltCompile(t, &Policy{FS: []FSRule{
 				// Reading an executable must not itself permit execution.
-				{Path: "/", Access: "r"},
+				{Path: "/usr/bin/true", Access: "r"},
+				{Path: "/bin/echo", Access: "r"},
 				{Path: "/usr/lib", Access: "rx"},
 				{Path: "/System/Library", Access: "rx"},
 				{Path: allowed, Access: "x"},
