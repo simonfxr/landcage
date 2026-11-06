@@ -23,6 +23,9 @@ func TestMain(m *testing.M) {
 }
 
 func runHelper(mode string) int {
+	if mode == "threads-nnp" {
+		return helperEnforceThreads()
+	}
 	pol := &Policy{
 		Name: "enforce-test",
 		FS: []FSRule{

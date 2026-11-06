@@ -49,6 +49,9 @@ func Enforce(p *Policy) error {
 	allRules := make([]ll.Rule, 0, len(fsRules)+len(netRules))
 	allRules = append(allRules, fsRules...)
 	allRules = append(allRules, netRules...)
+	// go-landlock handles all-thread enforcement and no_new_privs itself:
+	// ABI 11+ uses RESTRICT_SELF_NO_NEW_PRIVS with TSYNC, while older ABIs
+	// use prctl first. Do not duplicate that version-sensitive setup here.
 	if err := cfg.Restrict(allRules...); err != nil {
 		return fmt.Errorf("enforcing landlock: %w", err)
 	}

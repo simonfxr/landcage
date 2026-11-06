@@ -52,6 +52,11 @@ func (f LandlockFeatures) SupportsScoped() bool { return f.ABI >= 6 }
 // Landlock enforcement (ABI 8+).
 func (f LandlockFeatures) SupportsTSync() bool { return f.ABI >= 8 }
 
+// SupportsAtomicNoNewPrivs reports whether restrict_self can set no_new_privs
+// as part of enforcement (ABI 11+). go-landlock selects this automatically;
+// older kernels require a separate prctl before applying the ruleset.
+func (f LandlockFeatures) SupportsAtomicNoNewPrivs() bool { return f.ABI >= 11 }
+
 // SupportsRefer reports whether the kernel can restrict file reparenting
 // (refer access, ABI 2+).
 func (f LandlockFeatures) SupportsRefer() bool { return f.ABI >= 2 }
@@ -79,6 +84,7 @@ func (f LandlockFeatures) SupportsResolveUnix() bool { return f.ABI >= 9 }
 //	V3: bits 0-14 (15 flags) — adds truncate
 //	V5: bits 0-15 (16 flags) — adds ioctl_dev
 //	V9: bits 0-16 (17 flags) — adds resolve_unix
+//	V10, V11: unchanged filesystem rights
 func (f LandlockFeatures) MaxFSAccess() ll.AccessFSSet {
 	switch {
 	case f.ABI >= 9:
@@ -229,6 +235,11 @@ func (f LandlockFeatures) String() string {
 	}
 	if f.SupportsTSync() {
 		parts = append(parts, "tsync=yes")
+	}
+	if f.SupportsAtomicNoNewPrivs() {
+		parts = append(parts, "nnp=atomic")
+	} else if f.ABI >= 1 {
+		parts = append(parts, "nnp=prctl")
 	}
 
 	return "LandlockFeatures{" + strings.Join(parts, " ") + "}"

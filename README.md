@@ -176,7 +176,7 @@ are highly privileged: granting access can defeat sandbox isolation.**
 
 - [Policy Specification](LANDLOCK_SANDBOX_POLICY.md) — JSON policy schema (filesystem, network, IPC, namespaces, env)
 - [Template Reference](POLICY_TEMPLATES.md) — Jinja-style template language for `.json.j2` policies
-- [Landlock API Reference](LANDLOCK.md) — kernel ABI, including Linux 7.2 / ABI 10
+- [Landlock API Reference](LANDLOCK.md) — kernel ABI through ABI 11
 
 ## Requirements
 
@@ -198,10 +198,16 @@ On ABI 4–9, net restriction is TCP-only and UDP stays unrestricted (with
 a warning). `"net": "deny"` is best effort across ABI levels as detailed in
 the table above.
 
+ABI 11 adds `LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS`, not new access rights.
+go-landlock v0.11.0 automatically uses it with TSYNC to set `no_new_privs`
+and enforce the ruleset in one syscall; older kernels retain the `prctl`
+fallback. No policy changes or minimum-kernel bump are needed. `--dry-run`
+reports this as `nnp=atomic` on ABI 11+ and `nnp=prctl` on older ABIs.
+
 ## How It Works
 
 1. Loads the policy (renders Jinja template if `.json.j2`, otherwise parses directly)
 2. Resolves globs and creates directories (`create_dir`)
 3. Builds a Landlock ruleset with all supported access rights handled
-4. Enforces via `landlock_restrict_self()` (sets `no_new_privs`)
+4. Uses go-landlock to set `no_new_privs` and enforce the ruleset on all threads
 5. `exec()`s the child process inside the sandbox

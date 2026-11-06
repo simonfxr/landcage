@@ -4,7 +4,9 @@ Landlock is an unprivileged, stackable access-control mechanism that allows
 processes to sandbox themselves. No root privileges or special capabilities are
 required — only the `no_new_privs` flag (or `CAP_SYS_ADMIN`).
 
-**Current ABI version: 10 (Linux 7.2)**
+**ABI coverage: through 11 (go-landlock v0.11.0).** Query the running kernel
+with `LANDLOCK_CREATE_RULESET_VERSION`; ABI 11 adds an enforcement flag,
+not new access rights.
 
 ---
 
@@ -113,7 +115,9 @@ stacking onto an existing one).
 
 **Prerequisites:** The thread must either:
 - Have `no_new_privs` set (`prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)`), or
-- Have `CAP_SYS_ADMIN` in its user namespace
+- Have `CAP_SYS_ADMIN` in its user namespace, or
+- Pass `LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS` (ABI 11+) to set it as part of
+  successful enforcement
 
 **Parameters:**
 
@@ -130,6 +134,16 @@ stacking onto an existing one).
 | `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` | Enable audit logging for denials after `execve()` |
 | `LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF` | Disable audit logging for nested subdomain denials |
 | `LANDLOCK_RESTRICT_SELF_TSYNC` | Apply domain to all threads in the process atomically |
+| `LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS` | Set `no_new_privs` on successful enforcement (ABI 11+, `1 << 4`) |
+
+`NO_NEW_PRIVS` avoids a separate `prctl` call; it only sets the attribute if
+`landlock_restrict_self()` succeeds. With TSYNC, the ruleset and `no_new_privs`
+are applied across all threads. Without TSYNC, only the calling thread is
+affected.
+
+landcage delegates this to go-landlock v0.11.0: ABI 11+ uses TSYNC plus
+NO_NEW_PRIVS, ABI 8–10 sets the calling thread's `no_new_privs` with `prctl`
+before TSYNC, and older ABIs use the library's all-thread fallback.
 
 **Returns:** `0` on success, `-1` with errno on failure.
 
@@ -141,7 +155,7 @@ stacking onto an existing one).
 | `EINVAL` | Unknown flags |
 | `EBADF` | Invalid `ruleset_fd` |
 | `EBADFD` | `ruleset_fd` is not a ruleset FD |
-| `EPERM` | No `no_new_privs` and no `CAP_SYS_ADMIN`, or no read access to ruleset |
+| `EPERM` | No `no_new_privs`, `CAP_SYS_ADMIN`, or supported `NO_NEW_PRIVS` flag; or no read access to ruleset |
 | `E2BIG` | Maximum 16 stacked rulesets reached |
 
 ---
@@ -807,7 +821,7 @@ int main(void) {
     syscall(SYS_landlock_add_rule, ruleset_fd,
             LANDLOCK_RULE_NET_PORT, &net_attr, 0);
 
-    /* 4. Enforce */
+    /* 4. Enforce (prctl remains valid on both old and new ABIs) */
     prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     syscall(SYS_landlock_restrict_self, ruleset_fd, 0);
     close(ruleset_fd);
@@ -834,10 +848,12 @@ int main(void) {
 | 8 | 7.0 | `RESTRICT_SELF_TSYNC` |
 | 9 | 7.1 | `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` |
 | 10 | 7.2 | UDP (`BIND_UDP`, `CONNECT_SEND_UDP`), quiet rules (`ADD_RULE_QUIET`, `quiet_*` attr fields) |
+| 11 | Query ABI; release mapping not verified here | `RESTRICT_SELF_NO_NEW_PRIVS`; same access rights as ABI 10 |
 
 Kernel versions for ABI 7–10 are the first `v*` tags on the Linux 7.2.2 tree
 that contain each bump (`security/landlock/syscalls.c` `landlock_abi_version`).
-The running 7.2 kernel reports ABI 10 via `landlock_create_ruleset(..., LANDLOCK_CREATE_RULESET_VERSION)`.
+The ABI 11 entry follows go-landlock v0.11.0's syscall constants and upgrade
+notes; it does not assume a kernel release number.
 
 **landcage status:** when `net` is restricted, landcage handles TCP bind/connect
 (ABI 4+) and UDP bind/connect-send (ABI 10+). Unspecified ports are denied.
@@ -846,3 +862,12 @@ rules error on ABI < 10. On ABI 4–9, UDP cannot be restricted (warning only).
 This is an intentional break: TCP-only policies that relied on unrestricted UDP
 (typically DNS) need explicit `udp`/`any` allows, plus `"bind"` on port 0
 for UDP autobind.
+
+ABI 11 needs no new filesystem/network masks or policy fields. The library
+automatically adopts the new enforcement flag through `Config.Restrict`.
+Regression tests compare landcage's access sets against upstream V1–V11 and
+check enforcement plus `no_new_privs` on pre-existing OS threads. Running
+those tests on ABI 11+ is still needed to exercise the new flag; on ABI 10
+they exercise the older prctl/TSYNC path instead. An enclosing sandbox may
+already have set `no_new_privs`, in which case its 0→1 transition cannot be
+tested because the attribute cannot be reset.
