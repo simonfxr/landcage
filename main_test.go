@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -13,6 +14,9 @@ import (
 )
 
 func TestCLIRWPathRules(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix socket/device/symlink shorthand semantics; Windows grants are tested by CompilePSEC tests")
+	}
 	dir := t.TempDir()
 	file := filepath.Join(dir, "file")
 	if err := os.WriteFile(file, nil, 0600); err != nil {

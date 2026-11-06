@@ -1,21 +1,43 @@
 package policy
 
 import (
+	"fmt"
+	"maps"
 	"slices"
 	"strings"
 )
+
+// Without returns a copy without the named variables, using the platform's
+// environment name comparison.
+func (e Environ) Without(names ...string) Environ {
+	result := cloneEnv(e)
+	for _, name := range names {
+		delete(result, matchingEnvKey(result, name))
+	}
+	return result
+}
 
 // ApplyEnv applies environment variable changes from the policy,
 // returning a new Environ. All values should already be expanded by
 // template rendering at load time. Does not modify the input.
 func ApplyEnv(p *Policy, env Environ) (Environ, error) {
-	result := env.Clone()
+	names := slices.Sorted(maps.Keys(p.Env))
+	seen := make(map[string]string, len(names))
+	for _, name := range names {
+		key := envKey(name)
+		if previous, ok := seen[key]; ok {
+			return nil, fmt.Errorf("duplicate environment policy keys %q and %q", previous, name)
+		}
+		seen[key] = name
+	}
 
-	for name, entry := range p.Env {
-		newVal, unset := resolveEnvEntry(name, &entry, result)
-		if unset {
-			delete(result, name)
-		} else {
+	result := cloneEnv(env)
+	for _, name := range names {
+		entry := p.Env[name]
+		currentName := matchingEnvKey(result, name)
+		newVal, unset := resolveEnvEntry(currentName, &entry, result)
+		delete(result, currentName)
+		if !unset {
 			result[name] = newVal
 		}
 	}

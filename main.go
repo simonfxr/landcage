@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
-	"syscall"
 
 	"github.com/alexflint/go-arg"
 	"github.com/simonfxr/landcage/policy"
@@ -109,7 +107,7 @@ func main() {
 	}
 
 	// Before enforcement, and before the payload env (which may rewrite PATH).
-	bin, err := exec.LookPath(a.Cmd[0])
+	bin, err := resolveExecutable(a.Cmd[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "landcage: %v\n", err)
 		os.Exit(127)
@@ -122,18 +120,12 @@ func main() {
 // payloadEnv resolves the environment the payload must see. The re-exec'd child
 // runs with exactly this environment, plus the pipe fds in childStartup.
 func payloadEnv(pol *policy.Policy) (policy.Environ, error) {
-	env := policy.ProcessEnv()
-	delete(env, publicPolicyEnvKey)
+	env := policy.ProcessEnv().Without(publicPolicyEnvKey)
 	return policy.ApplyEnv(pol, env)
 }
 
 func printKernelFeatures(w io.Writer) {
-	feat, err := policy.DetectFeatures()
-	if err != nil {
-		fmt.Fprintf(w, "Kernel features: unavailable (%v)\n", err)
-		return
-	}
-	fmt.Fprintf(w, "Kernel features: %s\n", feat.String())
+	policy.PrintSandboxFeatures(w)
 }
 
 // childMain is the entry point for the re-exec'd child process (PID 1 in new namespaces).
@@ -186,8 +178,9 @@ func childMain() {
 		os.Exit(1)
 	}
 
-	syscall.Write(setupFD, []byte("ok"))
-	syscall.Close(setupFD)
+	setupPipe := os.NewFile(uintptr(setupFD), "landcage-setup")
+	_, _ = setupPipe.Write([]byte("ok"))
+	_ = setupPipe.Close()
 
 	// The command is the args after "--".
 	_, cmdArgs := splitAtDash(os.Args[1:])
@@ -297,12 +290,17 @@ func buildPolicy(a *args, p *arg.Parser) *policy.Policy {
 		}
 		// Exact file, socket, and device paths cannot carry directory-only
 		// rights. Stat follows symlinks, just as policy enforcement does.
-		fi, err := os.Stat(path)
-		if err == nil && !fi.IsDir() {
-			rule.Access = "rwxu"
-			rule.Refer = false
-		} else if err != nil && !os.IsNotExist(err) {
-			p.Fail(fmt.Sprintf("--rw %s: %v", path, err))
+		// Windows only supports directory RW grants. Its compiler performs
+		// no-follow traversal; a preliminary Stat could follow a junction to
+		// a remote share before the sandbox exists.
+		if runtime.GOOS != "windows" {
+			fi, err := os.Stat(path)
+			if err == nil && !fi.IsDir() {
+				rule.Access = "rwxu"
+				rule.Refer = false
+			} else if err != nil && !os.IsNotExist(err) {
+				p.Fail(fmt.Sprintf("--rw %s: %v", path, err))
+			}
 		}
 		pol.FS = append(pol.FS, rule)
 	}

@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/alexflint/go-arg v1.6.1
+	github.com/google/flatbuffers v25.12.19+incompatible
 	github.com/landlock-lsm/go-landlock v0.11.0
 	github.com/nikolalohinski/gonja/v2 v2.9.1
 	golang.org/x/sys v0.49.0

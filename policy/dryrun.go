@@ -9,9 +9,13 @@ import (
 )
 
 // DryRun resolves all rules and prints what would be enforced, without
-// actually applying the Landlock ruleset. All variable expansion must have
+// actually creating or applying a sandbox. All variable expansion must have
 // been performed before calling DryRun (via template rendering at load time).
 func DryRun(p *Policy, w io.Writer) error {
+	return platformDryRun(p, w)
+}
+
+func dryRunDefault(p *Policy, w io.Writer) error {
 	feat, featErr := DetectFeatures()
 	if featErr != nil {
 		feat = LandlockFeatures{ABI: 0}
@@ -169,7 +173,11 @@ func DryRun(p *Policy, w io.Writer) error {
 	fmt.Fprintf(w, "  abstract_unix: %s (kernel support: %s)%s\n", abstractUnix, scopeSupported, auWarn)
 	fmt.Fprintf(w, "  signal: %s (kernel support: %s)%s\n", signal, scopeSupported, sigWarn)
 
-	// Environment
+	printDryRunEnvironment(p, w)
+	return dryRunCompatibilityError(p, feat)
+}
+
+func printDryRunEnvironment(p *Policy, w io.Writer) {
 	if len(p.Env) > 0 {
 		fmt.Fprintf(w, "\nEnvironment:\n")
 		for name, entry := range p.Env {
@@ -192,8 +200,6 @@ func DryRun(p *Policy, w io.Writer) error {
 			}
 		}
 	}
-
-	return dryRunCompatibilityError(p, feat)
 }
 
 func dryRunCompatibilityError(p *Policy, feat LandlockFeatures) error {

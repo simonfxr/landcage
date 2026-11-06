@@ -2,6 +2,10 @@
 
 A Landlock-based process sandbox for Linux. Define access policies in JSON, enforce them with zero privileges.
 
+An experimental native Windows PSEC backend is available in the main CLI.
+See [Windows support](WINDOWS.md) for its policy subset, validated native Git
+workflows, and important limitations (including MSYS/Git Bash and SSH session 0).
+
 ## Install
 
 ```
@@ -178,6 +182,8 @@ are highly privileged: granting access can defeat sandbox isolation.**
 - [Template Reference](POLICY_TEMPLATES.md) — Jinja-style template language for `.json.j2` policies
 - [Landlock API Reference](LANDLOCK.md) — kernel ABI through ABI 11
 - [macOS SBPL backend](docs/osx-sbpl.md) — Seatbelt enforcement via `sandbox_init_with_parameters`
+- [Windows PSEC backend](WINDOWS.md) — experimental native Windows enforcement,
+  supported policies, and compatibility limitations
 
 ## Requirements
 
